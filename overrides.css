@@ -1,0 +1,9 @@
+.modal-backdrop[hidden] {
+  display: none !important;
+}
+
+@media (max-width: 640px) {
+  .rail-illustration .plan-chip {
+    display: none;
+  }
+}
