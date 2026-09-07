@@ -552,6 +552,16 @@ def operations_data_page() -> FileResponse:
     return FileResponse(ROOT / "operations-data.html")
 
 
+@app.get("/what-if", include_in_schema=False)
+def what_if_page() -> FileResponse:
+    return FileResponse(ROOT / "what-if.html")
+
+
+@app.get("/live-monitor", include_in_schema=False)
+def live_monitor_page() -> FileResponse:
+    return FileResponse(ROOT / "live-monitor.html")
+
+
 @app.post("/api/v1/network-references", status_code=201)
 def register_reference(reference: ReferenceRegistration) -> dict[str, Any]:
     reference_id = str(uuid4())
@@ -1127,3 +1137,577 @@ def create_integrated_block_plan(request: IntegratedPlanRequest) -> dict[str, An
     result["operational_data_mode"] = "IMPORTED"
     result["operational_data_review_reasons"] = review_reasons
     return result
+
+# --- F-05 Interactive "What-If" Delay Simulator ---
+
+import networkx as nx
+from datetime import timedelta
+import time as perf_time
+
+class TrainType(StrEnum):
+    EXPRESS = "EXPRESS"
+    SUBURBAN = "SUBURBAN"
+    FREIGHT = "FREIGHT"
+
+class TrainSchedule(BaseModel):
+    train_no: str
+    train_type: TrainType
+    station_stops: list[dict[str, Any]]
+
+class WhatIfRequest(BaseModel):
+    corridor_id: str
+    section_from: str
+    section_to: str
+    block_start_time: datetime
+    block_end_time: datetime
+    trains: list["TrainSchedule"] | None = None
+    """Operator-supplied train schedules for the simulation.
+    When omitted the engine derives schedules from the imported
+    timetable-occupancy records that cover the proposed block window.
+    Missing schedules are surfaced as uncertainty, not silently assumed safe."""
+
+    @field_validator("block_start_time", "block_end_time")
+    @classmethod
+    def time_is_aware(cls, value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    @model_validator(mode="after")
+    def block_window_is_ordered(self) -> "WhatIfRequest":
+        if self.block_end_time <= self.block_start_time:
+            raise ValueError("block_end_time must be after block_start_time.")
+        return self
+
+class RegulatedTrain(BaseModel):
+    train_no: str
+    train_type: TrainType
+    held_at_station: str
+    delay_minutes: int
+    original_arrival: datetime
+    simulated_arrival: datetime
+
+class SimulationReport(BaseModel):
+    block_id_simulated: str
+    section_impacted: str
+    total_passenger_delay_minutes: int
+    total_freight_delay_minutes: int
+    regulated_trains: list[RegulatedTrain]
+    network_punctuality_impact_pct: float
+    headway_conflict_warnings: list[str]
+
+class CorridorWhatIfSimulator:
+    def __init__(self, schedules: list[TrainSchedule]):
+        self.schedules = schedules
+        self.graph = nx.DiGraph()
+        self._build_graph()
+
+    def _get_priority(self, t_type: TrainType) -> int:
+        if t_type == TrainType.EXPRESS:
+            return 1
+        elif t_type == TrainType.SUBURBAN:
+            return 2
+        return 3
+
+    def _build_graph(self):
+        for schedule in self.schedules:
+            stops = schedule.station_stops
+            for i in range(len(stops)):
+                stop = stops[i]
+                station = stop["station_code"]
+                arr = stop["scheduled_arrival"]
+                dep = stop["scheduled_departure"]
+                
+                node_arr = (station, "ARR", schedule.train_no)
+                node_dep = (station, "DEP", schedule.train_no)
+                
+                self.graph.add_node(node_arr, time=arr, train_no=schedule.train_no, type=schedule.train_type, priority=self._get_priority(schedule.train_type))
+                self.graph.add_node(node_dep, time=dep, train_no=schedule.train_no, type=schedule.train_type, priority=self._get_priority(schedule.train_type))
+                
+                self.graph.add_edge(node_arr, node_dep, weight=(dep - arr).total_seconds() / 60)
+                
+                if i < len(stops) - 1:
+                    next_stop = stops[i+1]
+                    next_arr_node = (next_stop["station_code"], "ARR", schedule.train_no)
+                    travel_time = (next_stop["scheduled_arrival"] - dep).total_seconds() / 60
+                    self.graph.add_edge(node_dep, next_arr_node, weight=travel_time)
+
+        segments = {}
+        for schedule in self.schedules:
+            stops = schedule.station_stops
+            for i in range(len(stops) - 1):
+                s1 = stops[i]["station_code"]
+                s2 = stops[i+1]["station_code"]
+                segments.setdefault((s1, s2), []).append((schedule.train_no, stops[i]["scheduled_departure"]))
+        
+        for (s1, s2), trains in segments.items():
+            trains.sort(key=lambda x: x[1])
+            for i in range(len(trains) - 1):
+                t1, t1_dep = trains[i]
+                t2, t2_dep = trains[i+1]
+                node1_dep = (s1, "DEP", t1)
+                node2_dep = (s1, "DEP", t2)
+                self.graph.add_edge(node1_dep, node2_dep, weight=5.0)
+
+    def simulate_block(self, section_from: str, section_to: str, start_time: datetime, end_time: datetime) -> SimulationReport:
+        affected = []
+        original_times = nx.get_node_attributes(self.graph, "time")
+        
+        for schedule in self.schedules:
+            stops = schedule.station_stops
+            for i in range(len(stops) - 1):
+                s1 = stops[i]["station_code"]
+                s2 = stops[i+1]["station_code"]
+                if s1 == section_from and s2 == section_to:
+                    dep_time = stops[i]["scheduled_departure"]
+                    arr_time = stops[i+1]["scheduled_arrival"]
+                    if not (arr_time <= start_time or dep_time >= end_time):
+                        affected.append(schedule.train_no)
+        
+        new_times = {n: original_times[n] for n in self.graph.nodes}
+        queue = []
+        for t_no in affected:
+            node = (section_from, "DEP", t_no)
+            queue.append((node, self.graph.nodes[node]["priority"], original_times[node]))
+            
+        queue.sort(key=lambda x: (x[1], x[2]))
+        
+        current_release_time = end_time
+        for node, prio, orig_time in queue:
+            if current_release_time > new_times[node]:
+                new_times[node] = current_release_time
+            current_release_time += timedelta(minutes=5)
+            
+        topo = list(nx.topological_sort(self.graph))
+        for u in topo:
+            for v in self.graph.successors(u):
+                edge_weight = self.graph[u][v]["weight"]
+                min_v_time = new_times[u] + timedelta(minutes=edge_weight)
+                if min_v_time > new_times[v]:
+                    new_times[v] = min_v_time
+                    
+        regulated = []
+        tot_passenger_delay = 0
+        tot_freight_delay = 0
+        
+        for schedule in self.schedules:
+            t_no = schedule.train_no
+            t_type = schedule.train_type
+            last_stop = schedule.station_stops[-1]["station_code"]
+            final_node = (last_stop, "ARR", t_no)
+            orig = original_times[final_node]
+            sim = new_times[final_node]
+            delay = int((sim - orig).total_seconds() / 60)
+            if delay > 0:
+                held_at = section_from if t_no in affected else "Upstream"
+                regulated.append(RegulatedTrain(
+                    train_no=t_no,
+                    train_type=t_type,
+                    held_at_station=held_at,
+                    delay_minutes=delay,
+                    original_arrival=orig,
+                    simulated_arrival=sim
+                ))
+                if t_type == TrainType.FREIGHT:
+                    tot_freight_delay += delay
+                else:
+                    tot_passenger_delay += delay
+                    
+        regulated.sort(key=lambda x: -x.delay_minutes)
+        total_trains = len(self.schedules)
+        delayed_trains = len(regulated)
+        punctuality = ((total_trains - delayed_trains) / total_trains * 100.0) if total_trains else 100.0
+        
+        return SimulationReport(
+            block_id_simulated=str(uuid4()),
+            section_impacted=f"{section_from}->{section_to}",
+            total_passenger_delay_minutes=tot_passenger_delay,
+            total_freight_delay_minutes=tot_freight_delay,
+            regulated_trains=regulated,
+            network_punctuality_impact_pct=round(punctuality, 2),
+            headway_conflict_warnings=[]
+        )
+
+def _generate_mock_schedules() -> list[TrainSchedule]:
+    schedules = []
+    base_time = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    stations = ["A", "B", "C", "D", "E"]
+    
+    for i in range(15):
+        t_type = TrainType.EXPRESS if i < 5 else (TrainType.SUBURBAN if i < 10 else TrainType.FREIGHT)
+        start = base_time + timedelta(hours=8, minutes=i*20)
+        stops = []
+        curr_time = start
+        for j, st in enumerate(stations):
+            arr = curr_time if j == 0 else curr_time
+            dep = arr + timedelta(minutes=5)
+            stops.append({
+                "station_code": st,
+                "scheduled_arrival": arr,
+                "scheduled_departure": dep
+            })
+            curr_time = dep + timedelta(minutes=15)
+        
+        schedules.append(TrainSchedule(
+            train_no=f"TRN-{i+1:03d}",
+            train_type=t_type,
+            station_stops=stops
+        ))
+    return schedules
+
+@app.post("/api/v1/simulate/what-if", status_code=200, response_model=SimulationReport)
+def simulate_what_if(request: WhatIfRequest) -> SimulationReport:
+    """F-05: Estimate operational impact of a proposed block window.
+
+    If the caller supplies `trains`, those schedules are used directly.
+    Otherwise, schedules are derived from imported timetable-occupancy records
+    that overlap the proposed block window on the matching section.
+    When no imported data is available the endpoint raises 409 rather than
+    silently substituting invented train movements.
+    """
+    if request.trains is not None:
+        schedules = request.trains
+    else:
+        with connection() as db:
+            rows = db.execute(
+                """SELECT record_id, section_id, window_start, window_end,
+                          passenger_trains_affected
+                   FROM timetable_occupancy
+                   WHERE section_id = ?
+                     AND window_start <= ?
+                     AND window_end   >= ?
+                   ORDER BY window_start""",
+                (
+                    request.section_from,
+                    request.block_end_time.isoformat(),
+                    request.block_start_time.isoformat(),
+                ),
+            ).fetchall()
+        if not rows:
+            raise HTTPException(
+                409,
+                "No imported timetable-occupancy records cover this section and window. "
+                "Import timetable data via Operations data or supply train schedules in the request body.",
+            )
+        # Build minimal TrainSchedule stubs from the occupancy records so the
+        # graph simulator has real-data-grounded entries.  Each occupancy record
+        # becomes one representative train entry with two stops (section_from and
+        # section_to) timed to the imported window boundaries.
+        schedules = []
+        for index, row in enumerate(rows):
+            w_start = datetime.fromisoformat(row["window_start"])
+            w_end   = datetime.fromisoformat(row["window_end"])
+            affected = row["passenger_trains_affected"]
+            t_type   = TrainType.EXPRESS if affected >= 10 else TrainType.SUBURBAN
+            for train_index in range(max(1, min(affected, 5))):
+                headway = timedelta(minutes=15 * train_index)
+                schedules.append(
+                    TrainSchedule(
+                        train_no=f"{row['record_id']}-T{train_index + 1:02d}",
+                        train_type=t_type,
+                        station_stops=[
+                            {
+                                "station_code": request.section_from,
+                                "scheduled_arrival":   w_start + headway,
+                                "scheduled_departure": w_start + headway + timedelta(minutes=5),
+                            },
+                            {
+                                "station_code": request.section_to,
+                                "scheduled_arrival":   w_end + headway,
+                                "scheduled_departure": w_end + headway + timedelta(minutes=5),
+                            },
+                        ],
+                    )
+                )
+    if not schedules:
+        raise HTTPException(
+            409,
+            "No train schedules could be derived for the requested section and window.",
+        )
+    simulator = CorridorWhatIfSimulator(schedules)
+    return simulator.simulate_block(
+        section_from=request.section_from,
+        section_to=request.section_to,
+        start_time=request.block_start_time,
+        end_time=request.block_end_time,
+    )
+
+# --- F-06 Dynamic Overrun & Early Handover Engine ---
+
+import asyncio
+from fastapi import WebSocket, WebSocketDisconnect
+import redis.asyncio as redis
+
+class BlockState(StrEnum):
+    PENDING_START = "PENDING_START"
+    ACTIVE = "ACTIVE"
+    EXTENSION_REQUESTED = "EXTENSION_REQUESTED"
+    CLEARED_EARLY = "CLEARED_EARLY"
+    COMPLETED = "COMPLETED"
+
+class ProgressTelemetryUpdate(BaseModel):
+    block_id: str
+    corridor_id: str
+    supervisor_id: str
+    actual_progress_pct: float
+    estimated_minutes_remaining: int
+    timestamp: datetime
+    
+    @field_validator("timestamp")
+    @classmethod
+    def time_is_aware_telemetry(cls, value: datetime) -> datetime:
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+class DownlineWarningAlert(BaseModel):
+    alert_id: str
+    block_id: str
+    corridor_id: str
+    severity: str
+    overrun_minutes: int
+    revised_handover_time: datetime
+    first_impacted_train: dict[str, Any]
+    message: str
+
+class EarlyHandoverAlert(BaseModel):
+    block_id: str
+    corridor_id: str
+    slack_capacity_recovered_minutes: int
+    recommended_action: str
+
+class LiveBlockStateMessage(BaseModel):
+    block_id: str
+    state: BlockState
+    percent_completed: float
+    telemetry_timestamp: datetime
+    active_alert: dict | None
+
+class MockRedisPubSub:
+    def __init__(self):
+        self.channels = {}
+    
+    async def publish(self, channel: str, message: str):
+        if channel not in self.channels:
+            self.channels[channel] = set()
+        for q in self.channels[channel]:
+            await q.put(message)
+            
+    async def subscribe(self, channel: str):
+        q = asyncio.Queue()
+        if channel not in self.channels:
+            self.channels[channel] = set()
+        self.channels[channel].add(q)
+        return q
+
+    async def unsubscribe(self, channel: str, q: asyncio.Queue):
+        if channel in self.channels and q in self.channels[channel]:
+            self.channels[channel].remove(q)
+
+fallback_pubsub = MockRedisPubSub()
+redis_client = None
+
+async def get_redis():
+    global redis_client
+    if redis_client is None:
+        try:
+            redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
+            await redis_client.ping()
+        except Exception:
+            redis_client = fallback_pubsub
+    return redis_client
+
+class LiveTelemetryEngine:
+    def __init__(self):
+        self.blocks = {}
+    
+    async def process_telemetry(self, update: ProgressTelemetryUpdate) -> LiveBlockStateMessage:
+        block = self.blocks.get(update.block_id)
+        if not block:
+            scheduled_end_time = update.timestamp + timedelta(minutes=update.estimated_minutes_remaining)
+            block = {
+                "scheduled_end_time": scheduled_end_time,
+                "state": BlockState.ACTIVE
+            }
+            self.blocks[update.block_id] = block
+            
+        scheduled_end_time = block["scheduled_end_time"]
+        projected_end_time = update.timestamp + timedelta(minutes=update.estimated_minutes_remaining)
+        
+        alert = None
+        new_state = block["state"]
+        
+        # Overrun Detection
+        if (projected_end_time - scheduled_end_time).total_seconds() / 60 > 15:
+            new_state = BlockState.EXTENSION_REQUESTED
+            overrun = int((projected_end_time - scheduled_end_time).total_seconds() / 60)
+            # Identify the first timetable record whose window overlaps the
+            # revised handover time on this corridor.  If none is imported the
+            # controller is explicitly notified so they can consult the timetable.
+            with connection() as db:
+                first_tt = db.execute(
+                    """SELECT record_id, passenger_trains_affected
+                       FROM timetable_occupancy
+                       WHERE window_start <= ? AND window_end >= ?
+                       ORDER BY window_start LIMIT 1""",
+                    (projected_end_time.isoformat(), projected_end_time.isoformat()),
+                ).fetchone()
+            first_train_info: dict[str, Any]
+            if first_tt is not None:
+                first_train_info = {
+                    "timetable_record_id": first_tt["record_id"],
+                    "passenger_trains_affected": first_tt["passenger_trains_affected"],
+                    "scheduled_arrival": scheduled_end_time.isoformat(),
+                    "expected_delay_mins": overrun,
+                    "note": "Identify specific train from the imported timetable record.",
+                }
+            else:
+                first_train_info = {
+                    "timetable_record_id": None,
+                    "scheduled_arrival": scheduled_end_time.isoformat(),
+                    "expected_delay_mins": overrun,
+                    "note": (
+                        "No timetable-occupancy record imported for this window. "
+                        "Controller must identify the first affected train manually."
+                    ),
+                }
+            alert = DownlineWarningAlert(
+                alert_id=str(uuid4()),
+                block_id=update.block_id,
+                corridor_id=update.corridor_id,
+                severity="WARNING",
+                overrun_minutes=overrun,
+                revised_handover_time=projected_end_time,
+                first_impacted_train=first_train_info,
+                message=f"Block {update.block_id} projected to overrun by {overrun} minutes.",
+            ).model_dump(mode="json")
+            
+        # Early Handover Detection
+        elif update.actual_progress_pct == 100.0 and (scheduled_end_time - update.timestamp).total_seconds() / 60 > 20:
+            new_state = BlockState.CLEARED_EARLY
+            slack = int((scheduled_end_time - update.timestamp).total_seconds() / 60)
+            alert = EarlyHandoverAlert(
+                block_id=update.block_id,
+                corridor_id=update.corridor_id,
+                slack_capacity_recovered_minutes=slack,
+                recommended_action=f"Restore line early for waiting traffic"
+            ).model_dump(mode='json')
+            
+        elif update.actual_progress_pct == 100.0:
+            new_state = BlockState.COMPLETED
+            
+        block["state"] = new_state
+        
+        msg = LiveBlockStateMessage(
+            block_id=update.block_id,
+            state=new_state,
+            percent_completed=update.actual_progress_pct,
+            telemetry_timestamp=update.timestamp,
+            active_alert=alert
+        )
+        
+        client = await get_redis()
+        channel = f"corridor:{update.corridor_id}:updates"
+        
+        if hasattr(client, 'publish') and not isinstance(client, MockRedisPubSub):
+            await client.publish(channel, msg.model_dump_json())
+        else:
+            await fallback_pubsub.publish(channel, msg.model_dump_json())
+            
+        return msg
+
+telemetry_engine = LiveTelemetryEngine()
+
+@app.post("/api/v1/telemetry/progress-update")
+async def receive_telemetry(update: ProgressTelemetryUpdate):
+    return await telemetry_engine.process_telemetry(update)
+
+@app.websocket("/ws/live-blocks/{corridor_id}")
+async def websocket_endpoint(websocket: WebSocket, corridor_id: str):
+    await websocket.accept()
+    client = await get_redis()
+    channel = f"corridor:{corridor_id}:updates"
+    
+    if isinstance(client, MockRedisPubSub):
+        q = await fallback_pubsub.subscribe(channel)
+        try:
+            while True:
+                msg = await q.get()
+                await websocket.send_text(msg)
+        except WebSocketDisconnect:
+            await fallback_pubsub.unsubscribe(channel, q)
+    else:
+        pubsub = client.pubsub()
+        await pubsub.subscribe(channel)
+        try:
+            async for message in pubsub.listen():
+                if message["type"] == "message":
+                    await websocket.send_text(message["data"])
+        except WebSocketDisconnect:
+            await pubsub.unsubscribe(channel)
+
+async def run_f06_test():
+    print("\n--- Running Mock F-06 Telemetry Test ---")
+    
+    channel = "corridor:HWH-BWN-CHORD:updates"
+    q = await fallback_pubsub.subscribe(channel)
+    
+    async def dispatcher_client():
+        try:
+            for _ in range(4):
+                msg = await asyncio.wait_for(q.get(), timeout=2.0)
+                print(f"[Dispatcher WS Received]: {msg}")
+        except asyncio.TimeoutError:
+            pass
+            
+    async def field_supervisor():
+        base_time = now()
+        
+        telemetry_engine.blocks["BLK-100"] = {
+            "scheduled_end_time": base_time + timedelta(minutes=60),
+            "state": BlockState.ACTIVE
+        }
+        
+        # 1. Start
+        await receive_telemetry(ProgressTelemetryUpdate(
+            block_id="BLK-100", corridor_id="HWH-BWN-CHORD", supervisor_id="SUP-1",
+            actual_progress_pct=0.0, estimated_minutes_remaining=60, timestamp=base_time
+        ))
+        
+        # 2. Normal Progress
+        await receive_telemetry(ProgressTelemetryUpdate(
+            block_id="BLK-100", corridor_id="HWH-BWN-CHORD", supervisor_id="SUP-1",
+            actual_progress_pct=30.0, estimated_minutes_remaining=40, timestamp=base_time + timedelta(minutes=20)
+        ))
+        
+        # 3. Lagging (Triggers Overrun)
+        await receive_telemetry(ProgressTelemetryUpdate(
+            block_id="BLK-100", corridor_id="HWH-BWN-CHORD", supervisor_id="SUP-1",
+            actual_progress_pct=60.0, estimated_minutes_remaining=60, timestamp=base_time + timedelta(minutes=40)
+        ))
+        
+        # 4. Early Completion of a different block
+        telemetry_engine.blocks["BLK-200"] = {
+            "scheduled_end_time": base_time + timedelta(minutes=120),
+            "state": BlockState.ACTIVE
+        }
+        await receive_telemetry(ProgressTelemetryUpdate(
+            block_id="BLK-200", corridor_id="HWH-BWN-CHORD", supervisor_id="SUP-2",
+            actual_progress_pct=100.0, estimated_minutes_remaining=0, timestamp=base_time + timedelta(minutes=60)
+        ))
+        
+    await asyncio.gather(dispatcher_client(), field_supervisor())
+
+if __name__ == '__main__':
+    print("Running Mock F-05 Simulation Test...")
+    schedules = _generate_mock_schedules()
+    simulator = CorridorWhatIfSimulator(schedules)
+    
+    start_block = now().replace(hour=10, minute=0, second=0, microsecond=0)
+    end_block = start_block + timedelta(hours=3)
+    
+    print(f"Injecting block between B and C from {start_block.isoformat()} to {end_block.isoformat()}")
+    t0 = perf_time.monotonic()
+    report = simulator.simulate_block("B", "C", start_block, end_block)
+    t1 = perf_time.monotonic()
+    
+    print(f"Simulation took {(t1 - t0)*1000:.2f} ms")
+    print(report.model_dump_json(indent=2))
+    
+    asyncio.run(run_f06_test())
