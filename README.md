@@ -6,7 +6,7 @@ RailSync is a decision-support prototype for the SIH Automatic Block Planning pr
 
 It never sanctions, activates, extends, or restores a railway block. A controller remains responsible for every operational decision. The governing scope is [FEATURE_SPECIFICATIONS.md](FEATURE_SPECIFICATIONS.md).
 
-This is the handoff document for completed F-01 to F-04 work. It focuses on the tested **manual workflow**, because authorised live source-system integrations are outside this prototype.
+This is the handoff document for completed F-01 to F-06 work. It focuses on the tested **manual workflow**, because authorised live source-system integrations are outside this prototype.
 
 ## Non-negotiable rules
 
@@ -25,8 +25,10 @@ This is the handoff document for completed F-01 to F-04 work. It focuses on the 
 | F-02 | Complete | /feasibility | Candidate-window weather and rule assessment. |
 | F-03 | Complete | /priority | Explainable score, tier, and factor contributions. |
 | F-04 | Complete | /planner | Weekly/monthly proposed plan and deferred reasons. |
+| F-05 | Complete | /what-if | What-if operational-impact simulation. |
+| F-06 | Complete | /live-monitor | Live execution monitoring and alerts. |
 
-F-05 and later have not been implemented.
+F-07 and F-08 have not been implemented.
 
 ## Start locally
 
@@ -37,7 +39,7 @@ python -m uvicorn backend.main:app --reload
 
 Open http://127.0.0.1:8000/. Restart after backend edits. The submitted test records are in rail_sync.db; do not delete it if they are needed.
 
-## Primary manual F-01 → F-04 workflow
+## Primary manual F-01 → F-06 workflow
 
 ~~~text
 Verified controlled mapping + source maintenance ticket
@@ -51,6 +53,10 @@ F-03 transparent priority score
 F-04 considers every eligible task automatically
                     ↓
 Manual COA JSON → proposed coordinated plan
+                    ↓
+F-05 what-if simulation to assess impact
+                    ↓
+F-06 live monitoring and alerts
 ~~~
 
 F-04 has no manual task selector by design. It considers all complete F-01 tasks and reports why each is eligible or not ready.
@@ -272,9 +278,31 @@ The backend is [backend/main.py](backend/main.py), implemented with FastAPI and 
 | [feasibility.html](feasibility.html), [feasibility.js](feasibility.js) | F-02 manual assessment. |
 | [priority.html](priority.html), [priority.js](priority.js) | F-03 manual evaluation. |
 | [planner.html](planner.html), [planner.js](planner.js) | F-04 manual COA planner and plan rendering. |
-| [operations-data.html](operations-data.html), [operations-data.js](operations-data.js) | Optional stored operational-data flow. |
+| [what-if.html](what-if.html), [what-if.js](what-if.js) | F-05 what-if operational impact simulation. |
+| [live-monitor.html](live-monitor.html), [live-monitor.js](live-monitor.js) | F-06 live execution monitoring. |
 | [FEATURE_SPECIFICATIONS.md](FEATURE_SPECIFICATIONS.md) | Full F-01 through F-08 scope. |
 
-## Boundary for F-05+
+## Help/Instructions for implementing F-07 and F-08
 
-Future work must consume the F-01–F-04 audit trail and proposed-plan output; it must not overwrite historical source records, assessments, scores, or plans. Keep approvals and execution state separate from a proposed plan. Never turn a recommendation into live movement authority, a block extension, a signalling instruction, or a restoration command.
+For contributors continuing with F-07 and F-08, refer to `FEATURE_SPECIFICATIONS.md` for full requirements. Below is a high-level guide:
+
+### F-07: Planner and dispatcher operations cockpit
+- **Objective:** Build a unified operational interface integrating F-01 to F-06 features.
+- **Implementation Strategy:**
+  - Create a new frontend dashboard (e.g., `cockpit.html`).
+  - Implement a corridor timeline showing COA availability, proposed blocks, and sanctioned blocks.
+  - Provide a consolidated view of tasks with their priority, data-quality warnings, and feasibility states.
+  - Implement KPIs like planned block utilization, coordinated-task count, and deferred critical work.
+  - **Design Note:** Strictly use high-contrast visual encoding to distinguish between *proposed*, *sanctioned*, and *live* states.
+
+### F-08: Human approval, overrides, audit trail and formal reporting
+- **Objective:** Implement role-based access control, an append-only audit trail, and plan reporting/export.
+- **Implementation Strategy:**
+  - Introduce an authentication/authorization layer in the backend to distinguish roles (planner, reviewer, sanctioning authority).
+  - Add database tables for an append-only audit trail, tracking every recommendation, approval, override, actor, and timestamp.
+  - Enforce logic where deviations from recommended plans require explicit reason codes.
+  - Implement an export feature (PDF or structured template) for a sanction-memo draft. Do not use unapproved official templates.
+
+## Boundary for F-07+
+
+Future work must consume the F-01–F-06 audit trail and proposed-plan output; it must not overwrite historical source records, assessments, scores, or plans. Keep approvals and execution state separate from a proposed plan. Never turn a recommendation into live movement authority, a block extension, a signalling instruction, or a restoration command.
