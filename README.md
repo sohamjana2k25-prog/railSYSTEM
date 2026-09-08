@@ -44,7 +44,7 @@ python -m uvicorn backend.main:app --reload
 
 Open http://127.0.0.1:8000/. Restart after backend edits. The submitted test records are in rail_sync.db; do not delete it if they are needed.
 
-F-08 decisions use the server-configured `RAILSYNC_ACTOR` and `RAILSYNC_ROLE`; the browser role selector must match these values. Supported roles are `Section Controller`, `Chief Controller`, and `Safety Officer`. In a real deployment, replace these local environment settings with the railway identity provider integration.
+F-08 decisions use the server-configured `RAILSYNC_ACTOR` and `RAILSYNC_ROLE`. The cockpit reads and locks that identity before a decision can be submitted, preventing a browser/server mismatch. Supported roles are `Section Controller`, `Chief Controller`, and `Safety Officer`. In a real deployment, replace these local environment settings with the railway identity provider integration.
 
 ## Primary manual F-01 → F-08 workflow
 
