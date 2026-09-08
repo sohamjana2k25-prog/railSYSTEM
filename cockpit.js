@@ -4,6 +4,12 @@ let cockpitData = null;
 let currentSelectedBlock = null;
 
 document.addEventListener("DOMContentLoaded", () => {
+  const blockModal = document.getElementById("blockModalBackdrop");
+  if (blockModal) {
+    blockModal.hidden = true;
+    blockModal.classList.remove("is-open");
+    blockModal.style.display = "none";
+  }
   initEventListeners();
   loadCockpitIdentity();
   loadCockpitSummary();
@@ -399,11 +405,17 @@ function openBlockModal(block) {
   loadBlockAuditHistory(block.block_id);
 
   modal.hidden = false;
+  modal.classList.add("is-open");
+  modal.style.display = "grid";
 }
 
 function closeModal() {
   const modal = document.getElementById("blockModalBackdrop");
-  if (modal) modal.hidden = true;
+  if (modal) {
+    modal.hidden = true;
+    modal.classList.remove("is-open");
+    modal.style.display = "none";
+  }
   currentSelectedBlock = null;
 }
 

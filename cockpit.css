@@ -1,11 +1,11 @@
 /* RailSync — F-07 & F-08 Operations Cockpit Stylesheet */
 
 :root {
-  --cockpit-bg: #090d16;
-  --cockpit-card: #111827;
-  --cockpit-card-border: #1f293d;
-  --cockpit-text-main: #f3f4f6;
-  --cockpit-text-muted: #9ca3af;
+  --cockpit-bg: #f5f7fb;
+  --cockpit-card: #ffffff;
+  --cockpit-card-border: #dbe3ee;
+  --cockpit-text-main: #172033;
+  --cockpit-text-muted: #5f6b7a;
   --cockpit-accent: #0d9488;
   --cockpit-accent-light: #14b8a6;
   --dept-eng: #f97316;
@@ -667,6 +667,12 @@ body.cockpit-body {
 }
 
 /* Modal */
+.modal-backdrop:not(.is-open),
+.modal-backdrop[hidden],
+.drawer-backdrop[hidden] {
+  display: none !important;
+}
+
 .cockpit-modal {
   background: #111827;
   border: 1px solid #374151;
@@ -1112,4 +1118,171 @@ body.cockpit-body {
   .controller-identity-card {
     width: 100%;
   }
+}
+
+/* Light operations cockpit: preserve status/department colors while keeping
+   surfaces, controls, and modal content readable in the light application shell. */
+body.cockpit-body {
+  background: #f5f7fb;
+  color: #172033;
+}
+
+.topbar {
+  background: #ffffff;
+  border-color: #dbe3ee;
+}
+
+.brand {
+  color: #172033;
+}
+
+.nav-link {
+  color: #5f6b7a;
+}
+
+.user-role-badge {
+  background: #e6f7f4;
+  border-color: #99e1d5;
+  color: #0f766e;
+}
+
+.cockpit-banner {
+  background: linear-gradient(135deg, #ffffff, #f2faf8);
+  border-color: #dbe3ee;
+  box-shadow: 0 4px 20px rgba(31, 51, 77, 0.08);
+}
+
+.banner-title-area h1,
+.kpi-val,
+.section-title-bar h2,
+.pill-id,
+.modal-header h2,
+.drawer-header h2,
+.wi-metric-card strong,
+.cockpit-table td,
+.radio-text strong {
+  color: #172033;
+}
+
+.controller-identity-card,
+.gantt-section-row,
+.action-panel,
+.block-summary-grid,
+.wi-metric-card {
+  background: #f8fafc;
+  border-color: #dbe3ee;
+}
+
+.identity-controls input,
+.identity-controls select,
+.filter-group select,
+.form-col input,
+.form-col select,
+.form-col textarea,
+.status-chip {
+  background: #ffffff;
+  border-color: #cbd5e1;
+  color: #172033;
+}
+
+.kpi-card,
+.corridor-toolbar,
+.corridor-timeline-section,
+.deferred-section {
+  background: #ffffff;
+  border-color: #dbe3ee;
+  box-shadow: 0 4px 20px rgba(31, 51, 77, 0.08);
+}
+
+.kpi-card:hover {
+  border-color: #94a3b8;
+}
+
+.kpi-card.highlight-kpi {
+  background: linear-gradient(135deg, #ffffff, #fff8ef);
+}
+
+.kpi-sub,
+.panel-desc,
+.drawer-desc,
+.export-desc span,
+.pill-meta-foot,
+.audit-item-notes {
+  color: #64748b;
+}
+
+.legend-pills,
+.filter-group,
+.gantt-time-axis,
+.pill-time-slot {
+  color: #526174;
+}
+
+.section-title-bar,
+.modal-footer,
+.drawer-header,
+.audit-history-box {
+  border-color: #dbe3ee;
+}
+
+.section-row-blocks-lane {
+  border-color: #dbe3ee;
+  background: repeating-linear-gradient(
+    to right,
+    transparent 0,
+    transparent calc(25% - 1px),
+    rgba(100, 116, 139, 0.14) 25%
+  );
+}
+
+.block-pill {
+  background: #ffffff;
+  border-color: #cbd5e1;
+}
+
+.cockpit-table th {
+  background: #eef2f7;
+  color: #526174;
+}
+
+.cockpit-table tbody tr:hover {
+  background: #f8fafc;
+}
+
+.cockpit-modal,
+.cockpit-drawer {
+  background: #ffffff;
+  border-color: #dbe3ee;
+  box-shadow: 0 20px 40px rgba(31, 51, 77, 0.2);
+}
+
+.modal-header,
+.drawer-header,
+.export-panel {
+  background: #f1f5f9;
+  border-color: #dbe3ee;
+}
+
+.modal-backdrop,
+.drawer-backdrop {
+  background: rgba(15, 23, 42, 0.35);
+}
+
+.modal-close {
+  color: #475569;
+}
+
+.audit-timeline-item {
+  background: #f8fafc;
+  border-left-color: #14b8a6;
+}
+
+.audit-item-top {
+  color: #334155;
+}
+
+.cockpit-footer {
+  background: #eef2f7;
+  border-color: #dbe3ee;
+  color: #64748b;
 }

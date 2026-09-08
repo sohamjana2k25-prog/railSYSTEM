@@ -46,6 +46,8 @@ Open http://127.0.0.1:8000/. Restart after backend edits. The submitted test rec
 
 F-08 decisions use the server-configured `RAILSYNC_ACTOR` and `RAILSYNC_ROLE`. The cockpit reads and locks that identity before a decision can be submitted, preventing a browser/server mismatch. Supported roles are `Section Controller`, `Chief Controller`, and `Safety Officer`. In a real deployment, replace these local environment settings with the railway identity provider integration.
 
+The F-07/F-08 operations cockpit uses a light, high-contrast theme. Department and decision-state colors remain reserved for their operational meanings, while stored database values continue to be the only source for metrics, timeline blocks, and audit details.
+
 ## Primary manual F-01 → F-08 workflow
 
 ~~~text
@@ -302,6 +304,7 @@ Refer to `FEATURE_SPECIFICATIONS.md` for the governing requirements and use thes
 
 ### F-07: Planner and dispatcher operations cockpit
 - **Objective:** Build a unified operational interface integrating F-01 to F-06 features.
+- The cockpit overlay is closed by default and is opened only after selecting a stored block; its controls remain available for normal input.
 - **Implementation Strategy:**
   - Create a new frontend dashboard (e.g., `cockpit.html`).
   - Extend the corridor timeline with imported COA availability when its source record is present; never synthesize an availability window.
