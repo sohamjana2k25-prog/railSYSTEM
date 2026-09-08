@@ -6,6 +6,7 @@ No seed, mock, fallback or generated railway data is created by this service.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -15,11 +16,15 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import hashlib
+import io
 import httpx
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+from backend.memo_generator import generate_sanction_memo_html, generate_sanction_memo_pdf
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -448,8 +453,85 @@ def initialize_database() -> None:
                 approved_at TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS block_audit_log (
+                id TEXT PRIMARY KEY,
+                block_id TEXT NOT NULL,
+                plan_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                role TEXT NOT NULL,
+                action TEXT NOT NULL,
+                original_schedule_json TEXT NOT NULL,
+                modified_schedule_json TEXT,
+                reason_code TEXT NOT NULL,
+                justification_notes TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                previous_hash TEXT,
+                entry_hash TEXT
+            );
+            CREATE TABLE IF NOT EXISTS block_sanctions (
+                block_id TEXT PRIMARY KEY,
+                plan_id TEXT NOT NULL,
+                section_id TEXT NOT NULL,
+                state TEXT NOT NULL,
+                effective_start TEXT NOT NULL,
+                effective_end TEXT NOT NULL,
+                latest_action TEXT NOT NULL,
+                sanctioned_by TEXT,
+                sanctioned_role TEXT,
+                sanctioned_at TEXT,
+                justification TEXT,
+                reason_code TEXT,
+                details_json TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             """
         )
+        # Existing development databases predate the hash columns.  Preserve their
+        # historical rows as-is; every subsequently written entry is chained.
+        audit_columns = {row["name"] for row in db.execute("PRAGMA table_info(block_audit_log)")}
+        if "previous_hash" not in audit_columns:
+            db.execute("ALTER TABLE block_audit_log ADD COLUMN previous_hash TEXT")
+        if "entry_hash" not in audit_columns:
+            db.execute("ALTER TABLE block_audit_log ADD COLUMN entry_hash TEXT")
+        db.executescript(
+            """
+            CREATE TRIGGER IF NOT EXISTS prevent_audit_log_update
+            BEFORE UPDATE ON block_audit_log
+            BEGIN SELECT RAISE(ABORT, 'block_audit_log is append-only'); END;
+            CREATE TRIGGER IF NOT EXISTS prevent_audit_log_delete
+            BEFORE DELETE ON block_audit_log
+            BEGIN SELECT RAISE(ABORT, 'block_audit_log is append-only'); END;
+            """
+        )
+        # Ensure blocks from existing block_plans are registered in block_sanctions
+        plans = db.execute("SELECT id, result_json FROM block_plans").fetchall()
+        for p in plans:
+            try:
+                res = json.loads(p["result_json"])
+                for blk in res.get("scheduled_blocks", []):
+                    b_id = blk.get("corridor_id")
+                    if b_id:
+                        exists = db.execute("SELECT 1 FROM block_sanctions WHERE block_id = ?", (b_id,)).fetchone()
+                        if not exists:
+                            db.execute(
+                                """INSERT INTO block_sanctions
+                                   (block_id, plan_id, section_id, state, effective_start, effective_end,
+                                    latest_action, sanctioned_by, sanctioned_role, sanctioned_at,
+                                    justification, reason_code, details_json, updated_at)
+                                   VALUES (?, ?, ?, 'PROPOSED', ?, ?, 'PROPOSED', NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                                (
+                                    b_id,
+                                    p["id"],
+                                    blk.get("section_id", ""),
+                                    blk.get("window_start", ""),
+                                    blk.get("window_end", ""),
+                                    json.dumps(blk),
+                                    now().isoformat(),
+                                ),
+                            )
+            except Exception:
+                pass
+
 
 
 def now() -> datetime:
@@ -560,6 +642,11 @@ def what_if_page() -> FileResponse:
 @app.get("/live-monitor", include_in_schema=False)
 def live_monitor_page() -> FileResponse:
     return FileResponse(ROOT / "live-monitor.html")
+
+
+@app.get("/cockpit", include_in_schema=False)
+def cockpit_page() -> FileResponse:
+    return FileResponse(ROOT / "cockpit.html")
 
 
 @app.post("/api/v1/network-references", status_code=201)
@@ -1074,13 +1161,14 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
     for item in candidates:
         if item["task"].id not in scheduled_ids:
             deferred.append({"task_id": item["task"].id, "reason": "No remaining compatible COA capacity after optimizing higher-priority work and shared block use."})
+    plan_id = str(uuid4())
     blocks: list[dict[str, Any]] = []
     for index, window in enumerate(windows):
         assigned = sorted((item for item in best["assignments"] if item["window_index"] == index), key=lambda item: item["start_time"])
         if not assigned:
             continue
         blocks.append({
-            "corridor_id": window.corridor_id, "section_id": window.section_id,
+            "block_id": str(uuid4()), "corridor_id": window.corridor_id, "section_id": window.section_id,
             "window_start": window.start_time, "window_end": window.end_time,
             "timetable_reference": window.timetable_reference, "goods_forecast_reference": window.goods_forecast_reference,
             "passenger_trains_affected": window.passenger_trains_affected, "goods_trains_affected": window.goods_trains_affected,
@@ -1090,11 +1178,28 @@ def create_block_plan(request: BlockPlanRequest) -> dict[str, Any]:
             "total_maintenance_minutes": sum(item["task"].estimated_duration_minutes for item in assigned),
             "available_minutes": (window.end_time - window.start_time).total_seconds() / 60,
         })
-    plan_id = str(uuid4())
     result = {"plan_id": plan_id, "status": "PROPOSED", "horizon": request.horizon, "horizon_start": request.horizon_start, "horizon_end": request.horizon_end, "scheduled_blocks": blocks, "unscheduled_tasks": deferred, "metrics": {"scheduled_task_count": len(scheduled_ids), "unscheduled_task_count": len(deferred), "total_priority_score_scheduled": round(best["score"], 2), "distinct_corridor_disruptions": len(blocks), "shared_block_count": sum(1 for block in blocks if len(block["assigned_tasks"]) > 1), "total_block_hours_used": round(sum(block["used_minutes"] for block in blocks) / 60, 2), "parallel_block_hours_saved": round(sum(max(0, block["total_maintenance_minutes"] - block["used_minutes"]) for block in blocks) / 60, 2), "passenger_trains_affected": sum(block["passenger_trains_affected"] for block in blocks), "goods_trains_affected": sum(block["goods_trains_affected"] for block in blocks), "search_timed_out": timed_out}, "notes": ["Tasks run in parallel only when every concurrent task explicitly permits co-working, no crew or equipment resource conflicts exist, and COA capacity covers all crews; otherwise they are sequenced.", "Proposed only: controller sanction remains required."]}
     with connection() as db:
         db.execute("INSERT INTO block_plans VALUES (?, ?, ?, ?, ?, ?, ?)", (plan_id, request.horizon, request.horizon_start.isoformat(), request.horizon_end.isoformat(), json.dumps([window.model_dump(mode="json") for window in windows]), json.dumps(result, default=str), now().isoformat()))
+        for block in blocks:
+            db.execute(
+                """INSERT OR REPLACE INTO block_sanctions
+                   (block_id, plan_id, section_id, state, effective_start, effective_end,
+                    latest_action, sanctioned_by, sanctioned_role, sanctioned_at,
+                    justification, reason_code, details_json, updated_at)
+                   VALUES (?, ?, ?, 'PROPOSED', ?, ?, 'PROPOSED', NULL, NULL, NULL, NULL, NULL, ?, ?)""",
+                (
+                    block["block_id"],
+                    plan_id,
+                    block["section_id"],
+                    block["window_start"].isoformat() if isinstance(block["window_start"], datetime) else str(block["window_start"]),
+                    block["window_end"].isoformat() if isinstance(block["window_end"], datetime) else str(block["window_end"]),
+                    json.dumps(block, default=str),
+                    now().isoformat(),
+                ),
+            )
     return result
+
 
 
 @app.post("/api/v1/block-plans/from-integrated-data", status_code=201)
@@ -1642,8 +1747,632 @@ async def websocket_endpoint(websocket: WebSocket, corridor_id: str):
         except WebSocketDisconnect:
             await pubsub.unsubscribe(channel)
 
+
+# =====================================================================
+# --- F-07 & F-08: Dispatcher Cockpit, Overrides & Audit Ledger ---
+# =====================================================================
+
+class BlockSanctionState(StrEnum):
+    PROPOSED = "PROPOSED"
+    SANCTIONED = "SANCTIONED"
+    OVERRIDDEN = "OVERRIDDEN"
+    REJECTED = "REJECTED"
+    ACTIVE = "ACTIVE"
+    EXTENSION_REQUESTED = "EXTENSION_REQUESTED"
+    RESTORATION_RECORDED = "RESTORATION_RECORDED"
+    COMPLETED = "COMPLETED"
+
+
+class BlockActionRequest(BaseModel):
+    plan_id: str = Field(min_length=1)
+    actor: str = Field(min_length=2, max_length=120)
+    role: str = Field(min_length=2, max_length=120)
+    action: str = Field(min_length=2, max_length=60)
+    reason_code: str = Field(min_length=2, max_length=120)
+    justification_notes: str = Field(min_length=5)
+    modified_start: datetime | None = None
+    modified_end: datetime | None = None
+    modified_notes: str | None = None
+
+    @field_validator("modified_start", "modified_end")
+    @classmethod
+    def time_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    @field_validator("actor", "role", "reason_code", "justification_notes")
+    @classmethod
+    def text_fields_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("This field cannot be blank.")
+        return value
+
+    @model_validator(mode="after")
+    def override_window_is_complete_and_ordered(self) -> "BlockActionRequest":
+        if self.action.upper() in {"OVERRIDE", "OVERRIDDEN"}:
+            if self.modified_start is None or self.modified_end is None:
+                raise ValueError("An override requires both modified_start and modified_end.")
+            if self.modified_end <= self.modified_start:
+                raise ValueError("modified_end must be after modified_start.")
+        return self
+
+
+SANCTIONING_ROLES = frozenset({"Section Controller", "Chief Controller"})
+REVIEW_ROLES = frozenset({"Safety Officer"})
+SUPPORTED_ROLES = SANCTIONING_ROLES | REVIEW_ROLES
+
+
+def configured_identity() -> tuple[str, str]:
+    """Return the server-configured operator identity used for F-08 decisions."""
+    actor = os.getenv("RAILSYNC_ACTOR", "Local Operator").strip()
+    role = os.getenv("RAILSYNC_ROLE", "Section Controller").strip()
+    if not actor or role not in SUPPORTED_ROLES:
+        raise HTTPException(500, "The server F-08 identity is not configured with a supported role.")
+    return actor, role
+
+
+def _audit_entry_hash(previous_hash: str | None, values: dict[str, Any]) -> str:
+    """Hash the persisted decision fields to make the audit chain independently verifiable."""
+    material = json.dumps({"previous_hash": previous_hash, **values}, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def verify_audit_chain() -> dict[str, Any]:
+    with connection() as db:
+        rows = db.execute("SELECT * FROM block_audit_log ORDER BY created_at ASC, id ASC").fetchall()
+
+    expected_previous: str | None = None
+    errors: list[str] = []
+    unverifiable_legacy_entries: list[str] = []
+    for row in rows:
+        if not row["entry_hash"]:
+            unverifiable_legacy_entries.append(row["id"])
+            continue
+        if row["previous_hash"] != expected_previous:
+            errors.append(f"{row['id']}: previous_hash does not link to the preceding entry")
+        values = {
+            "id": row["id"], "block_id": row["block_id"], "plan_id": row["plan_id"],
+            "actor": row["actor"], "role": row["role"], "action": row["action"],
+            "original_schedule_json": row["original_schedule_json"],
+            "modified_schedule_json": row["modified_schedule_json"],
+            "reason_code": row["reason_code"], "justification_notes": row["justification_notes"],
+            "created_at": row["created_at"],
+        }
+        actual_hash = _audit_entry_hash(row["previous_hash"], values)
+        if row["entry_hash"] != actual_hash:
+            errors.append(f"{row['id']}: entry_hash does not match persisted audit fields")
+        expected_previous = row["entry_hash"]
+
+    return {
+        "valid": not errors,
+        "entry_count": len(rows),
+        "errors": errors,
+        "unverifiable_legacy_entries": unverifiable_legacy_entries,
+    }
+
+
+@app.get("/api/v1/cockpit/summary")
+def get_cockpit_summary() -> dict[str, Any]:
+    """F-07: Return aggregated KPIs, sections, blocks with sanction states, and unscheduled tasks.
+
+    Zero mock data: calculated entirely from stored block_plans, block_sanctions,
+    and ingestion records in rail_sync.db.
+    """
+    with connection() as db:
+        plan_rows = db.execute("SELECT * FROM block_plans ORDER BY created_at DESC").fetchall()
+        sanction_rows = db.execute("SELECT * FROM block_sanctions ORDER BY updated_at DESC").fetchall()
+        ref_rows = db.execute("SELECT DISTINCT section_id FROM network_references ORDER BY section_id").fetchall()
+        task_rows = db.execute("SELECT id, normalized_task_json FROM ingestion_records").fetchall()
+        feasibility_rows = db.execute(
+            "SELECT task_id, result_json, rule_version, created_at FROM feasibility_assessments ORDER BY created_at DESC"
+        ).fetchall()
+        audit_rows = db.execute("SELECT * FROM block_audit_log ORDER BY created_at DESC LIMIT 20").fetchall()
+        audit_counts = db.execute("SELECT block_id, COUNT(*) as cnt FROM block_audit_log GROUP BY block_id").fetchall()
+
+    audit_count_map = {r["block_id"]: r["cnt"] for r in audit_counts}
+    task_map = {}
+    for tr in task_rows:
+        if tr["normalized_task_json"]:
+            try:
+                normalized = json.loads(tr["normalized_task_json"])
+                task_map[normalized.get("id")] = normalized
+                task_map[normalized.get("source_reference")] = normalized
+            except Exception:
+                pass
+
+    sections = [r["section_id"] for r in ref_rows]
+    feasibility_map: dict[str, dict[str, Any]] = {}
+    for row in feasibility_rows:
+        if row["task_id"] in feasibility_map:
+            continue
+        try:
+            result = json.loads(row["result_json"])
+            feasibility_map[row["task_id"]] = {
+                "status": result.get("status", "NEEDS_REVIEW"),
+                "warning_reasons": result.get("warning_reasons", []),
+                "rule_version": row["rule_version"],
+                "assessed_at": row["created_at"],
+            }
+        except (TypeError, json.JSONDecodeError):
+            feasibility_map[row["task_id"]] = {"status": "NEEDS_REVIEW", "warning_reasons": ["Stored feasibility result could not be read."]}
+
+    # Map sanctions by block_id
+    sanction_map = {r["block_id"]: dict(r) for r in sanction_rows}
+
+    blocks: list[dict[str, Any]] = []
+    all_unscheduled: list[dict[str, Any]] = []
+    total_saved_hours = 0.0
+    total_used_hours = 0.0
+
+    seen_block_ids = set()
+    current_plan_id = plan_rows[0]["id"] if plan_rows else None
+
+    for pr in plan_rows:
+        try:
+            p_res = json.loads(pr["result_json"])
+            plan_id = pr["id"]
+            if plan_id != current_plan_id:
+                continue
+            metrics = p_res.get("metrics", {})
+            total_saved_hours += metrics.get("parallel_block_hours_saved", 0.0)
+            total_used_hours += metrics.get("total_block_hours_used", 0.0)
+
+            for dt in p_res.get("unscheduled_tasks", []):
+                all_unscheduled.append({
+                    "plan_id": plan_id,
+                    "task_id": dt.get("task_id"),
+                    "reason": dt.get("reason"),
+                })
+
+            for blk in p_res.get("scheduled_blocks", []):
+                b_id = blk.get("block_id") or blk.get("corridor_id")
+                if not b_id or b_id in seen_block_ids:
+                    continue
+                seen_block_ids.add(b_id)
+
+                sanction_entry = sanction_map.get(b_id, {})
+                curr_state = sanction_entry.get("state", "PROPOSED")
+                eff_start = sanction_entry.get("effective_start") or blk.get("window_start")
+                eff_end = sanction_entry.get("effective_end") or blk.get("window_end")
+
+                # Enrich assigned tasks with KM and asset info
+                enriched_tasks = []
+                for at in blk.get("assigned_tasks", []):
+                    tid = at.get("task_id")
+                    norm = task_map.get(tid, {})
+                    s_km = norm.get("start_km")
+                    e_km = norm.get("end_km")
+                    km_span_txt = f"KM {s_km:.1f}–{e_km:.1f}" if s_km is not None and e_km is not None else "Section bounds"
+                    enriched_tasks.append({
+                        "task_id": tid,
+                        "department": at.get("department") or norm.get("department"),
+                        "priority_score": at.get("priority_score"),
+                        "maintenance_type": norm.get("maintenance_type", "Scheduled Track Work"),
+                        "km_span": km_span_txt,
+                        "start_km": s_km,
+                        "end_km": e_km,
+                        "scheduled_start": at.get("scheduled_start"),
+                        "scheduled_end": at.get("scheduled_end"),
+                        "requires_traffic_block": at.get("requires_traffic_block", False),
+                        "requires_traction_disconnection": at.get("requires_traction_disconnection", False),
+                        "required_crews": at.get("required_crews", []),
+                        "asset_reference": norm.get("asset_reference"),
+                        "data_quality_status": norm.get("data_quality_status", "UNKNOWN"),
+                        "source_timestamp": norm.get("source_timestamp"),
+                        "feasibility": feasibility_map.get(tid, {"status": "NOT_ASSESSED", "warning_reasons": ["No feasibility assessment is recorded."]}),
+                    })
+
+                sec_id = blk.get("section_id", "")
+                if sec_id and sec_id not in sections:
+                    sections.append(sec_id)
+
+                # Determine overall precautions
+                req_traffic = any(t.get("requires_traffic_block") for t in enriched_tasks)
+                req_traction = any(t.get("requires_traction_disconnection") for t in enriched_tasks)
+
+                all_crews = []
+                for t in enriched_tasks:
+                    all_crews.extend(t.get("required_crews", []))
+
+                # Calculate duration in minutes
+                try:
+                    t_s = datetime.fromisoformat(str(eff_start))
+                    t_e = datetime.fromisoformat(str(eff_end))
+                    dur_mins = max(0, int((t_e - t_s).total_seconds() / 60))
+                except Exception:
+                    dur_mins = int(blk.get("available_minutes", 0))
+
+                blocks.append({
+                    "block_id": b_id,
+                    "plan_id": plan_id,
+                    "section_id": sec_id,
+                    "state": curr_state,
+                    "scheduled_start": blk.get("window_start"),
+                    "scheduled_end": blk.get("window_end"),
+                    "effective_start": eff_start,
+                    "effective_end": eff_end,
+                    "duration_minutes": dur_mins,
+                    "timetable_reference": blk.get("timetable_reference", "N/A"),
+                    "goods_forecast_reference": blk.get("goods_forecast_reference", "N/A"),
+                    "passenger_trains_affected": blk.get("passenger_trains_affected", 0),
+                    "goods_trains_affected": blk.get("goods_trains_affected", 0),
+                    "consolidated_departments": blk.get("consolidated_departments", []),
+                    "assigned_tasks": enriched_tasks,
+                    "requires_traffic_block": req_traffic,
+                    "requires_traction_disconnection": req_traction,
+                    "crews": sorted(set(all_crews)),
+                    "sanctioned_by": sanction_entry.get("sanctioned_by"),
+                    "sanctioned_role": sanction_entry.get("sanctioned_role"),
+                    "sanctioned_at": sanction_entry.get("sanctioned_at"),
+                    "reason_code": sanction_entry.get("reason_code"),
+                    "justification": sanction_entry.get("justification"),
+                    "audit_count": audit_count_map.get(b_id, 0),
+                })
+        except Exception:
+            continue
+
+    # State counts
+    sanction_counts = {"PROPOSED": 0, "SANCTIONED": 0, "OVERRIDDEN": 0, "REJECTED": 0, "ACTIVE": 0, "COMPLETED": 0}
+    for b in blocks:
+        st = b.get("state", "PROPOSED")
+        if st in sanction_counts:
+            sanction_counts[st] += 1
+
+    return {
+        "kpis": {
+            "total_block_hours_saved": round(total_saved_hours, 2),
+            "total_block_hours_used": round(total_used_hours, 2),
+            # A projected availability percentage needs an authority-approved
+            # corridor-capacity baseline.  It is deliberately not inferred from
+            # a fixed weekly duration or from incomplete source records.
+            "planned_availability_pct": None,
+            "availability_status": "NOT_AVAILABLE: no approved availability baseline is recorded.",
+            "total_scheduled_blocks": len(blocks),
+            "total_scheduled_tasks": sum(len(b["assigned_tasks"]) for b in blocks),
+            "total_unscheduled_tasks": len(all_unscheduled),
+            "sanction_counts": sanction_counts,
+        },
+        "sections": sorted(sections),
+        "blocks": blocks,
+        "unscheduled_tasks": all_unscheduled,
+        "recent_audit_logs": [dict(r) for r in audit_rows],
+    }
+
+
+@app.post("/api/v1/blocks/{block_id}/action", status_code=200)
+def submit_block_action(block_id: str, request: BlockActionRequest) -> dict[str, Any]:
+    """F-08: Human-in-the-loop sanction, override, rejection or restoration recording.
+
+    Validates reason code and justification, appends to the audit ledger,
+    and updates block_sanctions state.
+    """
+    with connection() as db:
+        sanction = db.execute("SELECT * FROM block_sanctions WHERE block_id = ?", (block_id,)).fetchone()
+
+    if not sanction:
+        raise HTTPException(404, f"Block '{block_id}' is not a registered proposed block.")
+    if sanction["plan_id"] != request.plan_id:
+        raise HTTPException(409, "The supplied plan_id does not own this block.")
+    configured_actor, configured_role = configured_identity()
+    if request.actor != configured_actor or request.role != configured_role:
+        raise HTTPException(403, "The supplied operator identity does not match the server-configured F-08 identity.")
+    try:
+        original_schedule = json.loads(sanction["details_json"])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise HTTPException(409, "The stored proposed schedule cannot be reconstructed.") from error
+
+    eff_start = sanction["effective_start"]
+    eff_end = sanction["effective_end"]
+
+    new_state = BlockSanctionState.PROPOSED
+    modified_schedule: dict[str, Any] | None = None
+
+    act = request.action.upper()
+    current_state = sanction["state"]
+    allowed_actions = {
+        "PROPOSED": {"APPROVE", "APPROVED", "SANCTION", "SANCTIONED", "OVERRIDE", "OVERRIDDEN", "REJECT", "REJECTED"},
+        "SANCTIONED": {"OVERRIDE", "OVERRIDDEN", "REJECT", "REJECTED", "ACTIVATE", "ACTIVE", "EXTEND", "EXTENSION_REQUESTED"},
+        "OVERRIDDEN": {"ACTIVATE", "ACTIVE", "REJECT", "REJECTED", "EXTEND", "EXTENSION_REQUESTED"},
+        "ACTIVE": {"EXTEND", "EXTENSION_REQUESTED", "RESTORE", "RESTORATION_RECORDED"},
+        "EXTENSION_REQUESTED": {"RESTORE", "RESTORATION_RECORDED", "REJECT", "REJECTED"},
+        "RESTORATION_RECORDED": {"COMPLETE", "COMPLETED"},
+        "REJECTED": set(),
+        "COMPLETED": set(),
+    }
+    if act not in allowed_actions.get(current_state, set()):
+        raise HTTPException(409, f"Action '{request.action}' is not valid from state '{current_state}'.")
+    if act in {"APPROVE", "APPROVED", "SANCTION", "SANCTIONED"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can sanction a block.")
+        new_state = BlockSanctionState.SANCTIONED
+    elif act in {"OVERRIDE", "OVERRIDDEN"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can override a block.")
+        new_state = BlockSanctionState.OVERRIDDEN
+        eff_start = request.modified_start.isoformat()
+        eff_end = request.modified_end.isoformat()
+        modified_schedule = {
+            "effective_start": eff_start,
+            "effective_end": eff_end,
+            "notes": request.modified_notes or request.justification_notes,
+        }
+    elif act in {"REJECT", "REJECTED"}:
+        if configured_role not in SANCTIONING_ROLES | REVIEW_ROLES:
+            raise HTTPException(403, "Only a reviewer or sanctioning authority can reject a block.")
+        new_state = BlockSanctionState.REJECTED
+    elif act in {"ACTIVATE", "ACTIVE"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can activate a block.")
+        new_state = BlockSanctionState.ACTIVE
+    elif act in {"EXTENSION_REQUESTED", "EXTEND"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can request an extension.")
+        new_state = BlockSanctionState.EXTENSION_REQUESTED
+        if request.modified_end is None:
+            raise HTTPException(422, "An extension request requires modified_end.")
+        if request.modified_end <= datetime.fromisoformat(eff_start):
+            raise HTTPException(422, "The extension end must be after the effective start.")
+        eff_end = request.modified_end.isoformat()
+        modified_schedule = {"effective_end": eff_end, "notes": request.justification_notes}
+    elif act in {"RESTORATION_RECORDED", "RESTORE"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can record restoration.")
+        new_state = BlockSanctionState.RESTORATION_RECORDED
+    elif act in {"COMPLETE", "COMPLETED"}:
+        if configured_role not in SANCTIONING_ROLES:
+            raise HTTPException(403, "Only a sanctioning authority can complete a block.")
+        new_state = BlockSanctionState.COMPLETED
+    else:
+        raise HTTPException(400, f"Unsupported block action '{request.action}'.")
+
+    audit_id = str(uuid4())
+    ts = now().isoformat()
+
+    with connection() as db:
+        previous = db.execute(
+            "SELECT entry_hash FROM block_audit_log WHERE entry_hash IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = previous["entry_hash"] if previous else None
+        audit_values = {
+            "id": audit_id, "block_id": block_id, "plan_id": request.plan_id,
+            "actor": configured_actor, "role": configured_role, "action": new_state.value,
+            "original_schedule_json": json.dumps(original_schedule, sort_keys=True, default=str),
+            "modified_schedule_json": json.dumps(modified_schedule, sort_keys=True, default=str) if modified_schedule else None,
+            "reason_code": request.reason_code, "justification_notes": request.justification_notes,
+            "created_at": ts,
+        }
+        entry_hash = _audit_entry_hash(previous_hash, audit_values)
+        db.execute(
+            """INSERT INTO block_audit_log
+               (id, block_id, plan_id, actor, role, action, original_schedule_json,
+                modified_schedule_json, reason_code, justification_notes, created_at, previous_hash, entry_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                audit_id,
+                block_id,
+                request.plan_id,
+                configured_actor,
+                configured_role,
+                new_state.value,
+                audit_values["original_schedule_json"], audit_values["modified_schedule_json"],
+                request.reason_code,
+                request.justification_notes,
+                ts,
+                previous_hash,
+                entry_hash,
+            ),
+        )
+
+        sec_id = sanction["section_id"]
+        db.execute(
+            """INSERT INTO block_sanctions
+               (block_id, plan_id, section_id, state, effective_start, effective_end,
+                latest_action, sanctioned_by, sanctioned_role, sanctioned_at,
+                justification, reason_code, details_json, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(block_id) DO UPDATE SET
+                   state = excluded.state,
+                   effective_start = excluded.effective_start,
+                   effective_end = excluded.effective_end,
+                   latest_action = excluded.latest_action,
+                   sanctioned_by = excluded.sanctioned_by,
+                   sanctioned_role = excluded.sanctioned_role,
+                   sanctioned_at = excluded.sanctioned_at,
+                   justification = excluded.justification,
+                   reason_code = excluded.reason_code,
+                   updated_at = excluded.updated_at""",
+            (
+                block_id,
+                request.plan_id,
+                sec_id,
+                new_state.value,
+                eff_start,
+                eff_end,
+                new_state.value,
+                configured_actor,
+                configured_role,
+                ts,
+                request.justification_notes,
+                request.reason_code,
+                sanction["details_json"],
+                ts,
+            ),
+        )
+
+    return {
+        "success": True,
+        "block_id": block_id,
+        "state": new_state.value,
+        "audit_id": audit_id,
+        "effective_start": eff_start,
+        "effective_end": eff_end,
+        "sanctioned_by": configured_actor,
+        "timestamp": ts,
+    }
+
+
+@app.get("/api/v1/blocks/{block_id}/audit-logs")
+def get_block_audit_logs(block_id: str) -> list[dict[str, Any]]:
+    """Return chronological audit records for a specific block."""
+    with connection() as db:
+        rows = db.execute(
+            "SELECT * FROM block_audit_log WHERE block_id = ? ORDER BY created_at DESC",
+            (block_id,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/v1/audit/logs")
+def get_audit_logs(block_id: str | None = None, action: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    """Return append-only regulatory audit ledger entries with optional filtering."""
+    query = "SELECT * FROM block_audit_log"
+    params = []
+    clauses = []
+    if block_id:
+        clauses.append("block_id = ?")
+        params.append(block_id)
+    if action:
+        clauses.append("action = ?")
+        params.append(action.upper())
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
+    query += " ORDER BY created_at DESC LIMIT ?"
+    params.append(max(1, min(limit, 500)))
+
+    with connection() as db:
+        rows = db.execute(query, tuple(params)).fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/api/v1/audit/verify")
+def audit_chain_status() -> dict[str, Any]:
+    """Verify every persisted audit hash and link in chronological order."""
+    return verify_audit_chain()
+
+
+@app.get("/api/v1/blocks/{block_id}/export-memo")
+def export_block_sanction_memo(block_id: str, format: str = "pdf") -> Response:
+    """F-08: Export Combined Block Sanction Memo draft in PDF or printable HTML.
+
+    This is a decision-support draft; it is not an authority-approved template.
+    """
+    with connection() as db:
+        sanction = db.execute("SELECT * FROM block_sanctions WHERE block_id = ?", (block_id,)).fetchone()
+        audit_row = db.execute(
+            "SELECT entry_hash FROM block_audit_log WHERE block_id = ? AND plan_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (block_id, sanction["plan_id"] if sanction else ""),
+        ).fetchone()
+        task_rows = db.execute("SELECT id, normalized_task_json FROM ingestion_records").fetchall()
+
+    task_map = {}
+    for tr in task_rows:
+        if tr["normalized_task_json"]:
+            try:
+                normalized = json.loads(tr["normalized_task_json"])
+                task_map[normalized.get("id")] = normalized
+                task_map[normalized.get("source_reference")] = normalized
+            except Exception:
+                pass
+
+    if not sanction:
+        raise HTTPException(404, f"Block '{block_id}' is not registered for memo export.")
+    try:
+        block_details = json.loads(sanction["details_json"])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise HTTPException(409, "The stored block details cannot be reconstructed.") from error
+    state = sanction["state"]
+    eff_start = sanction["effective_start"]
+    eff_end = sanction["effective_end"]
+    sanctioned_by = sanction["sanctioned_by"]
+    sanctioned_role = sanction["sanctioned_role"]
+    sanctioned_at = sanction["sanctioned_at"]
+    reason_code = sanction["reason_code"]
+    justification = sanction["justification"]
+
+    try:
+        t_s = datetime.fromisoformat(str(eff_start))
+        t_e = datetime.fromisoformat(str(eff_end))
+        dur_mins = max(0, int((t_e - t_s).total_seconds() / 60))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(409, "The recorded block window has invalid timestamps.") from error
+
+    enriched_tasks = []
+    km_starts = []
+    km_ends = []
+    all_crews = []
+    all_equipment = []
+    for at in block_details.get("assigned_tasks", []):
+        tid = at.get("task_id")
+        norm = task_map.get(tid, {})
+        s_km = norm.get("start_km")
+        e_km = norm.get("end_km")
+        if s_km is not None:
+            km_starts.append(s_km)
+        if e_km is not None:
+            km_ends.append(e_km)
+        all_crews.extend(at.get("required_crews", []))
+        all_equipment.extend(norm.get("required_equipment", []))
+        enriched_tasks.append({
+            "task_id": tid,
+            "department": at.get("department") or norm.get("department"),
+            "maintenance_type": norm.get("maintenance_type", "Track Maintenance"),
+            "km_span": f"KM {s_km:.1f}–{e_km:.1f}" if s_km is not None and e_km is not None else "Section Bounds",
+            "priority_score": at.get("priority_score"),
+            "scheduled_start": at.get("scheduled_start"),
+            "scheduled_end": at.get("scheduled_end"),
+            "requires_traffic_block": at.get("requires_traffic_block", False),
+            "requires_traction_disconnection": at.get("requires_traction_disconnection", False),
+        })
+
+    sec_id = block_details.get("section_id", "IR-CORRIDOR")
+    km_span_str = f"KM {min(km_starts):.3f} — {max(km_ends):.3f}" if km_starts and km_ends else "Section bounds verified in field"
+    v_hash = audit_row["entry_hash"] if audit_row and audit_row["entry_hash"] else "UNVERIFIED"
+    memo_ref = f"IR/DCO/ER/{sec_id}/{block_id}"
+
+    memo_data = {
+        "block_id": block_id,
+        "memo_reference": memo_ref,
+        "section_id": sec_id,
+        "state": state,
+        "effective_start": eff_start,
+        "effective_end": eff_end,
+        "duration_minutes": dur_mins,
+        "km_span": km_span_str,
+        "timetable_reference": block_details.get("timetable_reference"),
+        "goods_forecast_reference": block_details.get("goods_forecast_reference"),
+        "requires_traffic_block": any(t.get("requires_traffic_block") for t in enriched_tasks),
+        "requires_traction_disconnection": any(t.get("requires_traction_disconnection") for t in enriched_tasks),
+        "consolidated_departments": block_details.get("consolidated_departments", []),
+        "crews": sorted(set(all_crews)),
+        "equipment": sorted(set(all_equipment)),
+        "assigned_tasks": enriched_tasks,
+        "sanctioned_by": sanctioned_by,
+        "sanctioned_role": sanctioned_role,
+        "sanctioned_at": sanctioned_at,
+        "reason_code": reason_code,
+        "justification": justification,
+        "verification_hash": v_hash,
+    }
+
+    if format.lower() == "pdf":
+        pdf_bytes = generate_sanction_memo_pdf(memo_data)
+        return Response(
+            content=pdf_bytes,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="SANCTION_MEMO_{block_id}.pdf"'
+            },
+        )
+    else:
+        html_str = generate_sanction_memo_html(memo_data)
+        return HTMLResponse(content=html_str)
+
+
 async def run_f06_test():
     print("\n--- Running Mock F-06 Telemetry Test ---")
+
     
     channel = "corridor:HWH-BWN-CHORD:updates"
     q = await fallback_pubsub.subscribe(channel)

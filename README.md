@@ -6,7 +6,7 @@ RailSync is a decision-support prototype for the SIH Automatic Block Planning pr
 
 It never sanctions, activates, extends, or restores a railway block. A controller remains responsible for every operational decision. The governing scope is [FEATURE_SPECIFICATIONS.md](FEATURE_SPECIFICATIONS.md).
 
-This is the handoff document for completed F-01 to F-06 work. It focuses on the tested **manual workflow**, because authorised live source-system integrations are outside this prototype.
+This is the handoff document for F-01 to F-08 work. It focuses on the tested **manual workflow**, because authorised live source-system integrations are outside this prototype.
 
 ## Non-negotiable rules
 
@@ -16,6 +16,9 @@ This is the handoff document for completed F-01 to F-06 work. It focuses on the 
 - Open-Meteo is advisory input only. The user must supply the applicable railway-approved safety limits.
 - F-03 is an explainable weighted-policy baseline, not an ML prediction. The supplied joblib model is not used because it is a rolling-stock model without the required fixed-infrastructure/corridor fields.
 - Every F-04 output is a **PROPOSED** plan. Controller sanction remains mandatory.
+- Every F-07 cockpit metric and timeline slot is grounded strictly in stored database records; mock data is never substituted.
+- Every F-08 decision requires a justification and is written to an append-only, hash-chained ledger. The database additionally rejects audit-row updates and deletions.
+- F-08 enforces the supplied controller/reviewer role at the API boundary; integrating those asserted roles with the railway identity provider remains a deployment requirement.
 
 ## Completed scope
 
@@ -27,19 +30,23 @@ This is the handoff document for completed F-01 to F-06 work. It focuses on the 
 | F-04 | Complete | /planner | Weekly/monthly proposed plan and deferred reasons. |
 | F-05 | Complete | /what-if | What-if operational-impact simulation. |
 | F-06 | Complete | /live-monitor | Live execution monitoring and alerts. |
-
-F-07 and F-08 have not been implemented.
+| F-07 | Implemented | /cockpit | Database-grounded operations cockpit, master corridor timeline, KPIs, and multi-department block inspection. Projected availability stays unavailable until an approved baseline is imported. |
+| F-08 | Implemented | /cockpit | Role-guarded sanction/override authority, append-only hash-chained audit ledger, and Combined Block Sanction Memo draft export (PDF/HTML). |
 
 ## Start locally
 
 ~~~powershell
 python -m pip install -r requirements.txt
+$env:RAILSYNC_ACTOR = "Ananda Jana"
+$env:RAILSYNC_ROLE = "Section Controller"
 python -m uvicorn backend.main:app --reload
 ~~~
 
 Open http://127.0.0.1:8000/. Restart after backend edits. The submitted test records are in rail_sync.db; do not delete it if they are needed.
 
-## Primary manual F-01 → F-06 workflow
+F-08 decisions use the server-configured `RAILSYNC_ACTOR` and `RAILSYNC_ROLE`; the browser role selector must match these values. Supported roles are `Section Controller`, `Chief Controller`, and `Safety Officer`. In a real deployment, replace these local environment settings with the railway identity provider integration.
+
+## Primary manual F-01 → F-08 workflow
 
 ~~~text
 Verified controlled mapping + source maintenance ticket
@@ -57,7 +64,14 @@ Manual COA JSON → proposed coordinated plan
 F-05 what-if simulation to assess impact
                     ↓
 F-06 live monitoring and alerts
+                    ↓
+F-07 dispatcher operations cockpit (Gantt timeline & KPIs)
+                    ↓
+F-08 human sanction / override / rejection & audit logging
+                    ↓
+Combined Block Sanction Memo draft (PDF / Print Draft; authority template approval required)
 ~~~
+
 
 F-04 has no manual task selector by design. It considers all complete F-01 tasks and reports why each is eligible or not ready.
 
@@ -282,23 +296,23 @@ The backend is [backend/main.py](backend/main.py), implemented with FastAPI and 
 | [live-monitor.html](live-monitor.html), [live-monitor.js](live-monitor.js) | F-06 live execution monitoring. |
 | [FEATURE_SPECIFICATIONS.md](FEATURE_SPECIFICATIONS.md) | Full F-01 through F-08 scope. |
 
-## Help/Instructions for implementing F-07 and F-08
+## F-07/F-08 implementation notes
 
-For contributors continuing with F-07 and F-08, refer to `FEATURE_SPECIFICATIONS.md` for full requirements. Below is a high-level guide:
+Refer to `FEATURE_SPECIFICATIONS.md` for the governing requirements and use these notes when extending the implemented cockpit.
 
 ### F-07: Planner and dispatcher operations cockpit
 - **Objective:** Build a unified operational interface integrating F-01 to F-06 features.
 - **Implementation Strategy:**
   - Create a new frontend dashboard (e.g., `cockpit.html`).
-  - Implement a corridor timeline showing COA availability, proposed blocks, and sanctioned blocks.
+  - Extend the corridor timeline with imported COA availability when its source record is present; never synthesize an availability window.
   - Provide a consolidated view of tasks with their priority, data-quality warnings, and feasibility states.
-  - Implement KPIs like planned block utilization, coordinated-task count, and deferred critical work.
+  - Keep every KPI tied to stored records. Do not calculate projected availability until an authority-approved capacity baseline is available.
   - **Design Note:** Strictly use high-contrast visual encoding to distinguish between *proposed*, *sanctioned*, and *live* states.
 
 ### F-08: Human approval, overrides, audit trail and formal reporting
 - **Objective:** Implement role-based access control, an append-only audit trail, and plan reporting/export.
 - **Implementation Strategy:**
-  - Introduce an authentication/authorization layer in the backend to distinguish roles (planner, reviewer, sanctioning authority).
+  - Integrate the API's role guard with the railway identity provider before deployment; the prototype validates supplied role names but does not authenticate an identity.
   - Add database tables for an append-only audit trail, tracking every recommendation, approval, override, actor, and timestamp.
   - Enforce logic where deviations from recommended plans require explicit reason codes.
   - Implement an export feature (PDF or structured template) for a sanction-memo draft. Do not use unapproved official templates.
