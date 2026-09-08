@@ -5,6 +5,7 @@ let currentSelectedBlock = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   initEventListeners();
+  loadCockpitIdentity();
   loadCockpitSummary();
 });
 
@@ -149,6 +150,29 @@ async function loadCockpitSummary() {
     renderDeferredWork(cockpitData.unscheduled_tasks);
   } catch (err) {
     console.error("Cockpit summary error:", err);
+  }
+}
+
+async function loadCockpitIdentity() {
+  const actorInput = document.getElementById("controllerNameInput");
+  const roleSelect = document.getElementById("controllerRoleSelect");
+  const roleDisplay = document.getElementById("headerRoleDisplay");
+  if (!actorInput || !roleSelect || !roleDisplay) return;
+
+  try {
+    const response = await fetch("/api/v1/cockpit/identity");
+    if (!response.ok) throw new Error("Configured operator identity is unavailable.");
+    const identity = await response.json();
+    actorInput.value = identity.actor;
+    actorInput.readOnly = true;
+    roleSelect.value = identity.role;
+    roleSelect.disabled = true;
+    roleDisplay.textContent = identity.role;
+  } catch (error) {
+    actorInput.value = "";
+    actorInput.placeholder = "Server identity unavailable";
+    roleSelect.disabled = true;
+    console.error("Cockpit identity error:", error);
   }
 }
 

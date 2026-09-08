@@ -1853,6 +1853,13 @@ def verify_audit_chain() -> dict[str, Any]:
     }
 
 
+@app.get("/api/v1/cockpit/identity")
+def get_cockpit_identity() -> dict[str, str]:
+    """Expose the locally configured F-08 operator identity to this cockpit session."""
+    actor, role = configured_identity()
+    return {"actor": actor, "role": role}
+
+
 @app.get("/api/v1/cockpit/summary")
 def get_cockpit_summary() -> dict[str, Any]:
     """F-07: Return aggregated KPIs, sections, blocks with sanction states, and unscheduled tasks.
