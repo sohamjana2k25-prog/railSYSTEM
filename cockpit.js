@@ -600,12 +600,13 @@ async function handleWhatIfSubmit(e) {
 
     const report = await res.json();
     document.getElementById("wiPassDelay").innerHTML = `${report.total_passenger_delay_minutes || 0}<small> mins</small>`;
-    document.getElementById("wiRegTrains").textContent = (report.regulated_freight_trains || []).length;
-    document.getElementById("wiPunctuality").textContent = `${report.punctuality_impact_pct || 0}%`;
+    document.getElementById("wiRegTrains").textContent = (report.regulated_trains || []).length;
+    document.getElementById("wiPunctuality").textContent = `${report.network_punctuality_impact_pct ?? 0}%`;
 
     const warnBox = document.getElementById("wiWarningsBox");
-    if (report.conflict_warnings && report.conflict_warnings.length > 0) {
-      warnBox.innerHTML = report.conflict_warnings.map((w) => `<div>⚠ ${escapeHtml(w)}</div>`).join("");
+    const warnings = report.headway_conflict_warnings || [];
+    if (warnings.length > 0) {
+      warnBox.innerHTML = warnings.map((w) => `<div>⚠ ${escapeHtml(w)}</div>`).join("");
       warnBox.hidden = false;
     } else {
       warnBox.innerHTML = "<div>✓ No safety headway conflicts identified on this simulated run.</div>";
