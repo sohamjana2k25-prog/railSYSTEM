@@ -130,6 +130,14 @@ body.cockpit-body {
   color: var(--cockpit-text-muted);
 }
 
+.identity-hint {
+  display: block;
+  margin-top: 8px;
+  color: var(--cockpit-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .identity-controls input,
 .identity-controls select {
   background: #1f293d;
@@ -1285,4 +1293,165 @@ body.cockpit-body {
   background: #eef2f7;
   border-color: #dbe3ee;
   color: #64748b;
+}
+
+/* ── F-07 Priority Factor Breakdown ─────────────────────────── */
+.priority-task-breakdown {
+  background: #f8fafc;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin-bottom: 10px;
+}
+
+.priority-task-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.priority-task-id {
+  font-family: 'DM Mono', 'Courier New', monospace;
+  font-weight: 600;
+  font-size: 0.82rem;
+  color: #172033;
+}
+
+.priority-score-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 20px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tier-critical  { background: #fee2e2; color: #b91c1c; }
+.tier-high      { background: #ffedd5; color: #c2410c; }
+.tier-medium    { background: #fef9c3; color: #92400e; }
+.tier-low       { background: #dcfce7; color: #166534; }
+
+.priority-policy-ref {
+  font-size: 0.72rem;
+  color: #64748b;
+  margin-left: auto;
+}
+
+.factor-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.factor-row {
+  display: grid;
+  grid-template-columns: 160px 1fr 48px;
+  align-items: center;
+  gap: 8px;
+}
+
+.factor-label {
+  font-size: 0.76rem;
+  color: #334155;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.factor-bar-track {
+  height: 10px;
+  background: #e2e8f0;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.factor-bar-fill {
+  height: 100%;
+  border-radius: 5px;
+  transition: width 0.35s ease;
+  min-width: 2px;
+}
+
+.factor-score {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #334155;
+  text-align: right;
+  font-family: 'DM Mono', monospace;
+}
+
+.priority-explanation {
+  font-size: 0.74rem;
+  color: #5f6b7a;
+  margin: 10px 0 0;
+  font-style: italic;
+  border-top: 1px solid #dbe3ee;
+  padding-top: 8px;
+}
+
+/* ─── What-If Inline Error / Info Banner ─────────────────────────────────── */
+.wi-error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 8px;
+  font-size: 0.83rem;
+  line-height: 1.5;
+  margin-bottom: 14px;
+}
+.wi-error-banner.wi-error {
+  background: #fff1f1;
+  border: 1px solid #fca5a5;
+  color: #991b1b;
+}
+.wi-error-banner.wi-info {
+  background: #eff6ff;
+  border: 1px solid #93c5fd;
+  color: #1e40af;
+}
+.wi-error-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+  line-height: 1.5;
+}
+.wi-error-text {
+  flex: 1;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── What-If DB Hints Panel ─────────────────────────────────────────────── */
+.wi-hints-details {
+  background: #f8fafc;
+  border: 1px solid #dbe3ee;
+  border-radius: 8px;
+  margin-bottom: 16px;
+  font-size: 0.8rem;
+  overflow: hidden;
+}
+.wi-hints-details summary {
+  padding: 10px 14px;
+  cursor: pointer;
+  color: #0f766e;
+  font-weight: 600;
+  list-style: none;
+  user-select: none;
+}
+.wi-hints-details summary::-webkit-details-marker { display: none; }
+.wi-hints-details[open] summary {
+  border-bottom: 1px solid #dbe3ee;
+}
+.wi-hints-content {
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+.wi-hints-content code {
+  background: #e2e8f0;
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 0.76rem;
+  font-family: 'JetBrains Mono', monospace;
 }

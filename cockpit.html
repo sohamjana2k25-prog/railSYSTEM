@@ -11,7 +11,7 @@
     href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&family=Manrope:wght@600;700;800&display=swap"
     rel="stylesheet" />
   <link rel="stylesheet" href="/static/styles.css" />
-  <link rel="stylesheet" href="/static/cockpit.css?v=light-theme" />
+  <link rel="stylesheet" href="/static/cockpit.css?v=priority-bars" />
 </head>
 
 <body class="cockpit-body">
@@ -60,16 +60,17 @@
           <div class="identity-controls">
             <div class="control-row">
               <label for="controllerNameInput">Officer Name:</label>
-              <input type="text" id="controllerNameInput" placeholder="Loading server identity…" readonly />
+              <input type="text" id="controllerNameInput" placeholder="Enter officer name" aria-describedby="authorityIdentityHint" />
             </div>
             <div class="control-row">
               <label for="controllerRoleSelect">Authorized Role:</label>
-              <select id="controllerRoleSelect">
+              <select id="controllerRoleSelect" aria-describedby="authorityIdentityHint">
                 <option value="Section Controller">Section Controller (Sanctioning Authority)</option>
                 <option value="Chief Controller">Chief Controller (Divisional Head)</option>
                 <option value="Safety Officer">Safety Officer (Reviewer)</option>
               </select>
             </div>
+            <small class="identity-hint" id="authorityIdentityHint">Use the configured controller identity for this session.</small>
           </div>
         </div>
       </section>
@@ -277,14 +278,23 @@
           </table>
         </div>
 
+        <!-- F-07: Priority Factor Contribution Breakdown -->
+        <div class="modal-subheading" id="mPriorityBreakdownHeading" hidden>Priority Score — Factor Contribution Breakdown</div>
+        <div id="mPriorityBreakdown" hidden></div>
+
         <!-- F-08: Human Authority Action / Override Panel -->
         <div class="action-panel">
           <div class="action-panel-heading">
-            <h3>Section Controller Action &amp; Regulatory Override</h3>
-            <p class="panel-desc">
-              Select an action, choose an operational reason code, and enter mandatory justification notes. All
-              decisions are immutably logged to the tamper-evident audit ledger.
-            </p>
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:8px;">
+              <div>
+                <h3>Section Controller Action &amp; Regulatory Override</h3>
+                <p class="panel-desc">
+                  Select an action, choose an operational reason code, and enter mandatory justification notes. All
+                  decisions are immutably logged to the tamper-evident audit ledger.
+                </p>
+              </div>
+              <button type="button" class="outline-button compact" id="modalWhatIfBtn" style="white-space:nowrap;">⇄ Test What-If on this Block</button>
+            </div>
           </div>
 
           <div class="action-choice-group">
@@ -483,7 +493,21 @@
           Test candidate block adjustments against timetable occupancy before confirming sanction authority.
         </p>
 
+        <!-- Inline error/info banner (replaces alert dialogs) -->
+        <div id="wiErrorBanner" class="wi-error-banner" hidden role="alert" aria-live="polite"></div>
+        <!-- DB data hints -->
+        <details class="wi-hints-details" id="wiHintsDetails">
+          <summary>📋 View available timetable data in database</summary>
+          <div id="wiHintsContent" class="wi-hints-content">Loading…</div>
+        </details>
+
         <form id="cockpitWhatIfForm" class="what-if-form">
+          <div class="form-row">
+            <div class="form-col">
+              <label for="wiCorridorId">Corridor ID:</label>
+              <input type="text" id="wiCorridorId" required placeholder="Use the stored COA corridor identifier" />
+            </div>
+          </div>
           <div class="form-row">
             <div class="form-col">
               <label for="wiSectionFrom">Section / Origin Code:</label>
@@ -503,6 +527,14 @@
             <div class="form-col">
               <label for="wiEndTime">Proposed End (UTC):</label>
               <input type="datetime-local" id="wiEndTime" required />
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-col">
+              <label for="wiTrainSchedules">Verified Train Schedules JSON (optional):</label>
+              <textarea id="wiTrainSchedules" rows="4" spellcheck="false"
+                placeholder="Leave blank only when timetable schedules are imported. Paste verified TrainSchedule records when aggregate occupancy data is unavailable."></textarea>
             </div>
           </div>
 
@@ -528,12 +560,30 @@
             </div>
           </div>
           <div class="wi-warnings-box" id="wiWarningsBox"></div>
+          <div class="wi-trains-wrap" id="wiTrainsWrap" hidden style="margin-top: 14px;">
+            <h5 style="margin: 0 0 8px; font-size: 0.85rem; color: #1e293b;">Regulated Trains Breakdown</h5>
+            <div class="table-responsive">
+              <table class="cockpit-table" style="font-size: 0.78rem;">
+                <thead>
+                  <tr>
+                    <th>Train</th>
+                    <th>Type</th>
+                    <th>Held At</th>
+                    <th>Delay</th>
+                    <th>Orig Arrival</th>
+                    <th>Sim Arrival</th>
+                  </tr>
+                </thead>
+                <tbody id="wiTrainsTableBody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </div>
     </div>
   </div>
 
-  <script src="/static/cockpit.js"></script>
+  <script src="/static/cockpit.js?v=inline-errors-v2"></script>
 </body>
 
 </html>

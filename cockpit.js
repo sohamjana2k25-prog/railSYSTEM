@@ -2,6 +2,7 @@
 
 let cockpitData = null;
 let currentSelectedBlock = null;
+let cockpitIdentity = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   const blockModal = document.getElementById("blockModalBackdrop");
@@ -122,8 +123,12 @@ function initEventListeners() {
   const openWhatIfBtn = document.getElementById("openWhatIfDrawerBtn");
   const closeWhatIfBtn = document.getElementById("closeWhatIfDrawerBtn");
   const whatIfDrawer = document.getElementById("whatIfDrawerBackdrop");
+  const modalWhatIfBtn = document.getElementById("modalWhatIfBtn");
   if (openWhatIfBtn) {
-    openWhatIfBtn.addEventListener("click", openWhatIfDrawer);
+    openWhatIfBtn.addEventListener("click", () => openWhatIfDrawer());
+  }
+  if (modalWhatIfBtn) {
+    modalWhatIfBtn.addEventListener("click", () => openWhatIfDrawer());
   }
   if (closeWhatIfBtn) {
     closeWhatIfBtn.addEventListener("click", () => {
@@ -169,15 +174,24 @@ async function loadCockpitIdentity() {
     const response = await fetch("/api/v1/cockpit/identity");
     if (!response.ok) throw new Error("Configured operator identity is unavailable.");
     const identity = await response.json();
+    cockpitIdentity = identity;
     actorInput.value = identity.actor;
-    actorInput.readOnly = true;
+    actorInput.readOnly = false;
+    actorInput.placeholder = "Enter officer name";
     roleSelect.value = identity.role;
-    roleSelect.disabled = true;
+    roleSelect.disabled = false;
     roleDisplay.textContent = identity.role;
+    const hint = document.getElementById("authorityIdentityHint");
+    if (hint) hint.textContent = "You may edit these fields; submitted decisions must match the configured server identity.";
   } catch (error) {
+    cockpitIdentity = null;
     actorInput.value = "";
     actorInput.placeholder = "Server identity unavailable";
-    roleSelect.disabled = true;
+    actorInput.readOnly = false;
+    roleSelect.disabled = false;
+    roleDisplay.textContent = "Identity unavailable";
+    const hint = document.getElementById("authorityIdentityHint");
+    if (hint) hint.textContent = "Server identity is unavailable; decisions cannot be submitted until it is configured.";
     console.error("Cockpit identity error:", error);
   }
 }
@@ -385,6 +399,51 @@ function openBlockModal(block) {
     tbody.appendChild(tr);
   });
 
+  // F-07: Render Priority Factor Contribution Breakdown
+  const breakdownHeading = document.getElementById("mPriorityBreakdownHeading");
+  const breakdownBox = document.getElementById("mPriorityBreakdown");
+  const tasksWithPriority = (block.assigned_tasks || []).filter((t) => t.priority_evaluation);
+  if (tasksWithPriority.length > 0) {
+    breakdownHeading.hidden = false;
+    breakdownBox.hidden = false;
+    breakdownBox.innerHTML = "";
+    tasksWithPriority.forEach((t) => {
+      const pe = t.priority_evaluation;
+      const factors = pe.top_contributing_factors || [];
+      const maxContrib = Math.max(...factors.map((f) => f.score_contribution || 0), 1);
+      const tierClass = (pe.tier || "medium").toLowerCase();
+      const taskBlock = document.createElement("div");
+      taskBlock.className = "priority-task-breakdown";
+      taskBlock.innerHTML = `
+        <div class="priority-task-header">
+          <span class="priority-task-id">${escapeHtml(t.task_id || "")}</span>
+          <span class="priority-score-badge tier-${tierClass}">Score: ${pe.score != null ? pe.score.toFixed(1) : "N/A"} — ${escapeHtml(pe.tier || "UNKNOWN")}</span>
+          <span class="priority-policy-ref">Policy: ${escapeHtml(pe.policy_version || "—")}</span>
+        </div>
+        <div class="factor-bars">
+          ${factors.map((f) => {
+            const barPct = maxContrib > 0 ? Math.round((f.score_contribution / maxContrib) * 100) : 0;
+            const deptColor = t.department === "ENGINEERING" ? "#f97316" : t.department === "SIGNAL_TELECOM" ? "#3b82f6" : "#a855f7";
+            return `
+              <div class="factor-row">
+                <span class="factor-label" title="${escapeHtml(f.factor)}">${escapeHtml(f.factor)}</span>
+                <div class="factor-bar-track">
+                  <div class="factor-bar-fill" style="width:${barPct}%;background:${deptColor};" title="${f.score_contribution != null ? f.score_contribution.toFixed(2) : "0"} pts"></div>
+                </div>
+                <span class="factor-score">${f.score_contribution != null ? "+" + f.score_contribution.toFixed(2) : "0"}</span>
+              </div>`;
+          }).join("")}
+        </div>
+        ${pe.explanation ? `<p class="priority-explanation">${escapeHtml(pe.explanation)}</p>` : ""}
+      `;
+      breakdownBox.appendChild(taskBlock);
+    });
+  } else {
+    breakdownHeading.hidden = true;
+    breakdownBox.hidden = true;
+    breakdownBox.innerHTML = "";
+  }
+
   // Action Panel reset
   document.querySelector('input[name="blockActionChoice"][value="APPROVE"]').checked = true;
   document.getElementById("overrideInputsBox").hidden = true;
@@ -441,6 +500,18 @@ async function submitBlockAction() {
     return;
   }
 
+  if (!cockpitIdentity) {
+    statusMsg.className = "status-msg error";
+    statusMsg.textContent = "Server identity is unavailable; refresh after configuring the authority.";
+    return;
+  }
+
+  if (actor !== cockpitIdentity.actor || role !== cockpitIdentity.role) {
+    statusMsg.className = "status-msg error";
+    statusMsg.textContent = "Officer name and role must match the configured server identity.";
+    return;
+  }
+
   const payload = {
     plan_id: currentSelectedBlock.plan_id,
     actor: actor,
@@ -453,8 +524,8 @@ async function submitBlockAction() {
   if (["OVERRIDE", "EXTEND"].includes(actionChoice)) {
     const modStart = document.getElementById("overrideStartInput").value;
     const modEnd = document.getElementById("overrideEndInput").value;
-    if (modStart) payload.modified_start = new Date(modStart).toISOString();
-    if (modEnd) payload.modified_end = new Date(modEnd).toISOString();
+    if (modStart) payload.modified_start = datetimeLocalToUtcIso(modStart);
+    if (modEnd) payload.modified_end = datetimeLocalToUtcIso(modEnd);
   }
 
   statusMsg.className = "status-msg";
@@ -568,23 +639,134 @@ async function openAuditDrawer() {
 function openWhatIfDrawer() {
   const drawer = document.getElementById("whatIfDrawerBackdrop");
   if (!drawer) return;
+
+  const form = document.getElementById("cockpitWhatIfForm");
+  if (form) form.reset();
+
+  const corridorInput = document.getElementById("wiCorridorId");
+  if (corridorInput) corridorInput.value = "";
+  const secFromInput = document.getElementById("wiSectionFrom");
+  if (secFromInput) secFromInput.value = "";
+  const secToInput = document.getElementById("wiSectionTo");
+  if (secToInput) secToInput.value = "";
+  const startInput = document.getElementById("wiStartTime");
+  if (startInput) startInput.value = "";
+  const endInput = document.getElementById("wiEndTime");
+  if (endInput) endInput.value = "";
+  const trainsInput = document.getElementById("wiTrainSchedules");
+  if (trainsInput) trainsInput.value = "";
+
+  // Clear banners and results
+  wiClearError();
+  const resultsArea = document.getElementById("wiResultsArea");
+  if (resultsArea) resultsArea.hidden = true;
+  const warnBox = document.getElementById("wiWarningsBox");
+  if (warnBox) {
+    warnBox.innerHTML = "";
+    warnBox.hidden = true;
+  }
+  const trainsWrap = document.getElementById("wiTrainsWrap");
+  if (trainsWrap) trainsWrap.hidden = true;
+
   drawer.hidden = false;
 
+  // Load DB hints (non-blocking)
+  loadWiHints();
+}
+
+function wiShowError(msg, isInfo) {
+  const banner = document.getElementById("wiErrorBanner");
+  if (!banner) return;
+  banner.innerHTML = `<span class="wi-error-icon">${isInfo ? 'ℹ️' : '⚠️'}</span><span class="wi-error-text">${escapeHtml(msg)}</span>`;
+  banner.className = isInfo ? "wi-error-banner wi-info" : "wi-error-banner wi-error";
+  banner.hidden = false;
+  banner.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function wiClearError() {
+  const banner = document.getElementById("wiErrorBanner");
+  if (banner) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+  }
+}
+
+async function loadWiHints() {
+  const content = document.getElementById("wiHintsContent");
+  if (!content) return;
+  try {
+    const res = await fetch("/api/v1/simulate/what-if/hints");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    if (!data.records || data.records.length === 0) {
+      content.innerHTML = `<p style="color:#94a3b8;font-size:0.8rem;">No timetable-occupancy records found in database. You must supply train schedules in the JSON field.</p>`;
+      return;
+    }
+    content.innerHTML = `<p style="font-size:0.78rem;color:#64748b;margin:0 0 6px;">These records exist in the DB and can be simulated without JSON input:</p>` +
+      `<table class="cockpit-table" style="font-size:0.76rem;"><thead><tr><th>Corridor ID</th><th>Section ID</th><th>Window Start (UTC)</th><th>Window End (UTC)</th><th>Passenger Trains</th></tr></thead><tbody>` +
+      data.records.map(r => `<tr>
+        <td><code>${escapeHtml(r.corridor_id || '—')}</code></td>
+        <td><code>${escapeHtml(r.section_id)}</code></td>
+        <td>${escapeHtml(r.window_start)}</td>
+        <td>${escapeHtml(r.window_end)}</td>
+        <td>${r.passenger_trains_affected}</td>
+      </tr>`).join("") +
+      `</tbody></table>
+      <p style="font-size:0.76rem;color:#94a3b8;margin:6px 0 0;">Tip: enter Section Origin = first token before "-" in Section ID, e.g. <code>HWH</code> for <code>HWH-BDC-UP-MAIN</code>.</p>`;
+  } catch (err) {
+    content.innerHTML = `<p style="color:#f87171;font-size:0.78rem;">Could not load hints: ${escapeHtml(err.message)}</p>`;
+  }
 }
 
 async function handleWhatIfSubmit(e) {
   e.preventDefault();
+  wiClearError();
   const btn = document.getElementById("runWiSimBtn");
   const resultsArea = document.getElementById("wiResultsArea");
   btn.disabled = true;
   btn.textContent = "Simulating delay propagation...";
 
+  const startVal = document.getElementById("wiStartTime").value;
+  const endVal = document.getElementById("wiEndTime").value;
+
+  const startIso = datetimeLocalToUtcIso(startVal);
+  const endIso = datetimeLocalToUtcIso(endVal);
+
+  if (!startIso || !endIso) {
+    wiShowError("Invalid date/time format. Please use the date picker to select start and end times.");
+    btn.disabled = false;
+    btn.textContent = "Run Operational Delay Simulation";
+    return;
+  }
+
+  if (new Date(endIso) <= new Date(startIso)) {
+    wiShowError("Proposed End time must be after Proposed Start time.");
+    btn.disabled = false;
+    btn.textContent = "Run Operational Delay Simulation";
+    return;
+  }
+
   const payload = {
+    corridor_id: document.getElementById("wiCorridorId").value.trim(),
     section_from: document.getElementById("wiSectionFrom").value.trim(),
     section_to: document.getElementById("wiSectionTo").value.trim(),
-    block_start_time: new Date(document.getElementById("wiStartTime").value).toISOString(),
-    block_end_time: new Date(document.getElementById("wiEndTime").value).toISOString(),
+    block_start_time: startIso,
+    block_end_time: endIso,
   };
+
+  const schedulesRaw = document.getElementById("wiTrainSchedules").value.trim();
+  if (schedulesRaw) {
+    try {
+      const schedules = JSON.parse(schedulesRaw);
+      if (!Array.isArray(schedules)) throw new Error("Train schedules must be a JSON array.");
+      payload.trains = schedules;
+    } catch (error) {
+      wiShowError(`Train schedule JSON validation failed: ${error.message}`);
+      btn.disabled = false;
+      btn.textContent = "Run Operational Delay Simulation";
+      return;
+    }
+  }
 
   try {
     const res = await fetch("/api/v1/simulate/what-if", {
@@ -594,8 +776,18 @@ async function handleWhatIfSubmit(e) {
     });
 
     if (!res.ok) {
-      const err = await res.json();
-      throw new Error(err.detail || res.statusText);
+      let detailStr = `Server returned ${res.status}: ${res.statusText}`;
+      try {
+        const err = await res.json();
+        if (typeof err.detail === "string") {
+          detailStr = err.detail;
+        } else if (Array.isArray(err.detail)) {
+          detailStr = err.detail.map(d => `${d.loc ? d.loc.join(".") + ": " : ""}${d.msg}`).join("\n");
+        } else if (err.detail) {
+          detailStr = JSON.stringify(err.detail);
+        }
+      } catch {}
+      throw new Error(detailStr);
     }
 
     const report = await res.json();
@@ -613,9 +805,35 @@ async function handleWhatIfSubmit(e) {
       warnBox.hidden = false;
     }
 
+    const trainsWrap = document.getElementById("wiTrainsWrap");
+    const trainsTbody = document.getElementById("wiTrainsTableBody");
+    if (trainsWrap && trainsTbody) {
+      const regTrains = report.regulated_trains || [];
+      if (regTrains.length > 0) {
+        trainsTbody.innerHTML = regTrains.map(t => `
+          <tr>
+            <td><strong>${escapeHtml(t.train_no)}</strong></td>
+            <td><span class="dept-pill" style="background:#e0f2fe;color:#0369a1;">${escapeHtml(t.train_type)}</span></td>
+            <td>${escapeHtml(t.held_at_station)}</td>
+            <td style="color:${t.delay_minutes >= 30 ? '#dc2626' : '#ea580c'};font-weight:700;">+${t.delay_minutes} min</td>
+            <td>${formatIsoTime(t.original_arrival)}</td>
+            <td><strong>${formatIsoTime(t.simulated_arrival)}</strong></td>
+          </tr>
+        `).join("");
+        trainsWrap.hidden = false;
+      } else {
+        trainsWrap.hidden = true;
+      }
+    }
+
     resultsArea.hidden = false;
   } catch (err) {
-    alert(`What-If simulation failed: ${err.message}`);
+    wiShowError(err.message);
+    // Open the hints if it's a 409 (no timetable match) so user can see what's available
+    if (err.message.includes("No imported timetable") || err.message.includes("No train schedules")) {
+      const details = document.getElementById("wiHintsDetails");
+      if (details) details.open = true;
+    }
   } finally {
     btn.disabled = false;
     btn.textContent = "Run Operational Delay Simulation";
@@ -669,6 +887,13 @@ function formatIsoDateTime(isoStr) {
   } catch {
     return isoStr;
   }
+}
+
+function datetimeLocalToUtcIso(value) {
+  if (!value) return null;
+  const normalized = value.length === 16 ? `${value}:00` : value;
+  const parsed = new Date(`${normalized}Z`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
 }
 
 function escapeHtml(str) {

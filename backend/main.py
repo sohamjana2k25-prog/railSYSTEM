@@ -1299,6 +1299,15 @@ class SimulationReport(BaseModel):
     network_punctuality_impact_pct: float
     headway_conflict_warnings: list[str]
 
+def _parse_iso_dt(v: Any) -> datetime:
+    if isinstance(v, datetime):
+        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+    if isinstance(v, str):
+        v_clean = v.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(v_clean)
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    raise ValueError(f"Expected datetime or ISO string, got {type(v)}")
+
 class CorridorWhatIfSimulator:
     def __init__(self, schedules: list[TrainSchedule]):
         self.schedules = schedules
@@ -1317,9 +1326,9 @@ class CorridorWhatIfSimulator:
             stops = schedule.station_stops
             for i in range(len(stops)):
                 stop = stops[i]
-                station = stop["station_code"]
-                arr = stop["scheduled_arrival"]
-                dep = stop["scheduled_departure"]
+                station = stop["station_code"] if isinstance(stop, dict) else stop.station_code
+                arr = _parse_iso_dt(stop["scheduled_arrival"] if isinstance(stop, dict) else stop.scheduled_arrival)
+                dep = _parse_iso_dt(stop["scheduled_departure"] if isinstance(stop, dict) else stop.scheduled_departure)
                 
                 node_arr = (station, "ARR", schedule.train_no)
                 node_dep = (station, "DEP", schedule.train_no)
@@ -1327,21 +1336,24 @@ class CorridorWhatIfSimulator:
                 self.graph.add_node(node_arr, time=arr, train_no=schedule.train_no, type=schedule.train_type, priority=self._get_priority(schedule.train_type))
                 self.graph.add_node(node_dep, time=dep, train_no=schedule.train_no, type=schedule.train_type, priority=self._get_priority(schedule.train_type))
                 
-                self.graph.add_edge(node_arr, node_dep, weight=(dep - arr).total_seconds() / 60)
+                self.graph.add_edge(node_arr, node_dep, weight=max(0.0, (dep - arr).total_seconds() / 60))
                 
                 if i < len(stops) - 1:
                     next_stop = stops[i+1]
-                    next_arr_node = (next_stop["station_code"], "ARR", schedule.train_no)
-                    travel_time = (next_stop["scheduled_arrival"] - dep).total_seconds() / 60
+                    next_station = next_stop["station_code"] if isinstance(next_stop, dict) else next_stop.station_code
+                    next_arr = _parse_iso_dt(next_stop["scheduled_arrival"] if isinstance(next_stop, dict) else next_stop.scheduled_arrival)
+                    next_arr_node = (next_station, "ARR", schedule.train_no)
+                    travel_time = max(1.0, (next_arr - dep).total_seconds() / 60)
                     self.graph.add_edge(node_dep, next_arr_node, weight=travel_time)
 
         segments = {}
         for schedule in self.schedules:
             stops = schedule.station_stops
             for i in range(len(stops) - 1):
-                s1 = stops[i]["station_code"]
-                s2 = stops[i+1]["station_code"]
-                segments.setdefault((s1, s2), []).append((schedule.train_no, stops[i]["scheduled_departure"]))
+                s1 = stops[i]["station_code"] if isinstance(stops[i], dict) else stops[i].station_code
+                s2 = stops[i+1]["station_code"] if isinstance(stops[i+1], dict) else stops[i+1].station_code
+                s1_dep = _parse_iso_dt(stops[i]["scheduled_departure"] if isinstance(stops[i], dict) else stops[i].scheduled_departure)
+                segments.setdefault((s1, s2), []).append((schedule.train_no, s1_dep))
         
         for (s1, s2), trains in segments.items():
             trains.sort(key=lambda x: x[1])
@@ -1352,6 +1364,20 @@ class CorridorWhatIfSimulator:
                 node2_dep = (s1, "DEP", t2)
                 self.graph.add_edge(node1_dep, node2_dep, weight=5.0)
 
+    def _matches_section(self, s1: str, s2: str, section_from: str, section_to: str) -> bool:
+        if s1 == section_from and s2 == section_to:
+            return True
+        tokens_from = set(section_from.replace("_", "-").split("-"))
+        tokens_to = set(section_to.replace("_", "-").split("-"))
+        all_section_tokens = tokens_from.union(tokens_to)
+        if s1 in all_section_tokens and s2 in all_section_tokens and s1 != s2:
+            return True
+        if s1 in section_from and s2 in section_to:
+            return True
+        if s1 == section_from or s2 == section_to:
+            return True
+        return False
+
     def simulate_block(self, section_from: str, section_to: str, start_time: datetime, end_time: datetime) -> SimulationReport:
         affected = []
         original_times = nx.get_node_attributes(self.graph, "time")
@@ -1359,19 +1385,21 @@ class CorridorWhatIfSimulator:
         for schedule in self.schedules:
             stops = schedule.station_stops
             for i in range(len(stops) - 1):
-                s1 = stops[i]["station_code"]
-                s2 = stops[i+1]["station_code"]
-                if s1 == section_from and s2 == section_to:
-                    dep_time = stops[i]["scheduled_departure"]
-                    arr_time = stops[i+1]["scheduled_arrival"]
+                s1 = stops[i]["station_code"] if isinstance(stops[i], dict) else stops[i].station_code
+                s2 = stops[i+1]["station_code"] if isinstance(stops[i+1], dict) else stops[i+1].station_code
+                dep_time = _parse_iso_dt(stops[i]["scheduled_departure"] if isinstance(stops[i], dict) else stops[i].scheduled_departure)
+                arr_time = _parse_iso_dt(stops[i+1]["scheduled_arrival"] if isinstance(stops[i+1], dict) else stops[i+1].scheduled_arrival)
+                if self._matches_section(s1, s2, section_from, section_to):
                     if not (arr_time <= start_time or dep_time >= end_time):
-                        affected.append(schedule.train_no)
+                        affected.append((schedule.train_no, s1))
+                        break
         
         new_times = {n: original_times[n] for n in self.graph.nodes}
         queue = []
-        for t_no in affected:
-            node = (section_from, "DEP", t_no)
-            queue.append((node, self.graph.nodes[node]["priority"], original_times[node]))
+        for t_no, dep_station in affected:
+            node = (dep_station, "DEP", t_no)
+            if node in self.graph.nodes:
+                queue.append((node, self.graph.nodes[node]["priority"], original_times[node]))
             
         queue.sort(key=lambda x: (x[1], x[2]))
         
@@ -1396,13 +1424,14 @@ class CorridorWhatIfSimulator:
         for schedule in self.schedules:
             t_no = schedule.train_no
             t_type = schedule.train_type
-            last_stop = schedule.station_stops[-1]["station_code"]
-            final_node = (last_stop, "ARR", t_no)
+            last_stop = schedule.station_stops[-1]
+            last_station = last_stop["station_code"] if isinstance(last_stop, dict) else last_stop.station_code
+            final_node = (last_station, "ARR", t_no)
             orig = original_times[final_node]
             sim = new_times[final_node]
             delay = int((sim - orig).total_seconds() / 60)
             if delay > 0:
-                held_at = section_from if t_no in affected else "Upstream"
+                held_at = next((s for t, s in affected if t == t_no), "Upstream")
                 regulated.append(RegulatedTrain(
                     train_no=t_no,
                     train_type=t_type,
@@ -1421,6 +1450,15 @@ class CorridorWhatIfSimulator:
         delayed_trains = len(regulated)
         punctuality = ((total_trains - delayed_trains) / total_trains * 100.0) if total_trains else 100.0
         
+        headway_warnings = []
+        for u, v in self.graph.edges():
+            if u[1] == "DEP" and v[1] == "DEP":
+                diff_min = (new_times[v] - new_times[u]).total_seconds() / 60
+                if diff_min < 4.9:
+                    headway_warnings.append(
+                        f"Headway between Train {u[2]} and Train {v[2]} at {u[0]} compressed to {diff_min:.1f} min (minimum safe headway is 5.0 min)."
+                    )
+
         return SimulationReport(
             block_id_simulated=str(uuid4()),
             section_impacted=f"{section_from}->{section_to}",
@@ -1428,12 +1466,12 @@ class CorridorWhatIfSimulator:
             total_freight_delay_minutes=tot_freight_delay,
             regulated_trains=regulated,
             network_punctuality_impact_pct=round(punctuality, 2),
-            headway_conflict_warnings=[]
+            headway_conflict_warnings=headway_warnings
         )
 
 def _generate_mock_schedules() -> list[TrainSchedule]:
     schedules = []
-    base_time = now().replace(hour=0, minute=0, second=0, microsecond=0)
+    base_time = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
     stations = ["A", "B", "C", "D", "E"]
     
     for i in range(15):
@@ -1458,6 +1496,35 @@ def _generate_mock_schedules() -> list[TrainSchedule]:
         ))
     return schedules
 
+@app.get("/api/v1/simulate/what-if/hints", status_code=200)
+def what_if_hints():
+    """Return all timetable-occupancy records to help the UI show users
+    what corridor / section / window combinations are already in the database.
+    """
+    with connection() as db:
+        rows = db.execute(
+            """SELECT to_.record_id, to_.section_id, to_.window_start, to_.window_end,
+                      to_.passenger_trains_affected,
+                      (SELECT cw.corridor_id FROM coa_windows cw
+                       WHERE json_extract(cw.window_json, '$.section_id') = to_.section_id
+                       LIMIT 1) AS corridor_id
+               FROM timetable_occupancy to_
+               ORDER BY to_.window_start"""
+        ).fetchall()
+    return {
+        "records": [
+            {
+                "record_id": r["record_id"],
+                "section_id": r["section_id"],
+                "window_start": r["window_start"],
+                "window_end": r["window_end"],
+                "passenger_trains_affected": r["passenger_trains_affected"],
+                "corridor_id": r["corridor_id"],
+            }
+            for r in rows
+        ]
+    }
+
 @app.post("/api/v1/simulate/what-if", status_code=200, response_model=SimulationReport)
 def simulate_what_if(request: WhatIfRequest) -> SimulationReport:
     """F-05: Estimate operational impact of a proposed block window.
@@ -1472,26 +1539,64 @@ def simulate_what_if(request: WhatIfRequest) -> SimulationReport:
         schedules = request.trains
     else:
         with connection() as db:
+            from_tok = request.section_from.split('-')[0].strip() if request.section_from else ""
+            to_tok = request.section_to.split('-')[0].strip() if request.section_to else ""
             rows = db.execute(
                 """SELECT record_id, section_id, window_start, window_end,
                           passenger_trains_affected
                    FROM timetable_occupancy
-                   WHERE section_id = ?
-                     AND window_start <= ?
-                     AND window_end   >= ?
+                   WHERE (
+                       section_id = ?
+                       OR section_id = ?
+                       OR (section_id LIKE ? AND section_id LIKE ?)
+                       OR section_id IN (
+                           SELECT json_extract(window_json, '$.section_id')
+                           FROM coa_windows
+                           WHERE corridor_id = ?
+                       )
+                       OR section_id IN (
+                           SELECT section_id
+                           FROM network_references
+                           WHERE source_reference = ? OR section_id = ?
+                       )
+                   )
+                   AND window_start <= ?
+                   AND window_end   >= ?
                    ORDER BY window_start""",
                 (
+                    request.section_from,
+                    request.corridor_id,
+                    f"%{from_tok}%" if from_tok else "%",
+                    f"%{to_tok}%" if to_tok else "%",
+                    request.corridor_id,
+                    request.section_from,
                     request.section_from,
                     request.block_end_time.isoformat(),
                     request.block_start_time.isoformat(),
                 ),
             ).fetchall()
-        if not rows:
-            raise HTTPException(
-                409,
-                "No imported timetable-occupancy records cover this section and window. "
-                "Import timetable data via Operations data or supply train schedules in the request body.",
-            )
+            # Build a hint for the user when no match found
+            if not rows:
+                all_rows = db.execute(
+                    "SELECT section_id, window_start, window_end FROM timetable_occupancy ORDER BY window_start LIMIT 5"
+                ).fetchall()
+                if all_rows:
+                    hint_lines = ", ".join(
+                        f"{r['section_id']} [{r['window_start'][:16]} – {r['window_end'][:16]}]"
+                        for r in all_rows
+                    )
+                    raise HTTPException(
+                        409,
+                        f"No timetable-occupancy records match section '{request.section_from}->{request.section_to}' "
+                        f"within [{request.block_start_time.isoformat()[:16]} – {request.block_end_time.isoformat()[:16]}]. "
+                        f"Available records: {hint_lines}. "
+                        f"Adjust the section codes / window, or supply train schedules as JSON.",
+                    )
+                raise HTTPException(
+                    409,
+                    "No imported timetable-occupancy records found in the database. "
+                    "Import timetable data via Operations Data page or supply train schedules in the JSON field.",
+                )
         # Build minimal TrainSchedule stubs from the occupancy records so the
         # graph simulator has real-data-grounded entries.  Each occupancy record
         # becomes one representative train entry with two stops (section_from and
@@ -1875,6 +1980,9 @@ def get_cockpit_summary() -> dict[str, Any]:
         feasibility_rows = db.execute(
             "SELECT task_id, result_json, rule_version, created_at FROM feasibility_assessments ORDER BY created_at DESC"
         ).fetchall()
+        priority_rows = db.execute(
+            "SELECT task_id, policy_version, result_json, created_at FROM priority_evaluations ORDER BY created_at DESC"
+        ).fetchall()
         audit_rows = db.execute("SELECT * FROM block_audit_log ORDER BY created_at DESC LIMIT 20").fetchall()
         audit_counts = db.execute("SELECT block_id, COUNT(*) as cnt FROM block_audit_log GROUP BY block_id").fetchall()
 
@@ -1904,6 +2012,23 @@ def get_cockpit_summary() -> dict[str, Any]:
             }
         except (TypeError, json.JSONDecodeError):
             feasibility_map[row["task_id"]] = {"status": "NEEDS_REVIEW", "warning_reasons": ["Stored feasibility result could not be read."]}
+
+    priority_map: dict[str, dict[str, Any]] = {}
+    for row in priority_rows:
+        if row["task_id"] in priority_map:
+            continue
+        try:
+            p_res = json.loads(row["result_json"])
+            priority_map[row["task_id"]] = {
+                "score": p_res.get("score"),
+                "tier": p_res.get("tier"),
+                "policy_version": row["policy_version"],
+                "top_contributing_factors": p_res.get("top_contributing_factors", []),
+                "explanation": p_res.get("explanation"),
+                "evaluated_at": row["created_at"],
+            }
+        except (TypeError, json.JSONDecodeError):
+            pass
 
     # Map sanctions by block_id
     sanction_map = {r["block_id"]: dict(r) for r in sanction_rows}
@@ -1969,6 +2094,7 @@ def get_cockpit_summary() -> dict[str, Any]:
                         "data_quality_status": norm.get("data_quality_status", "UNKNOWN"),
                         "source_timestamp": norm.get("source_timestamp"),
                         "feasibility": feasibility_map.get(tid, {"status": "NOT_ASSESSED", "warning_reasons": ["No feasibility assessment is recorded."]}),
+                        "priority_evaluation": priority_map.get(tid),
                     })
 
                 sec_id = blk.get("section_id", "")
@@ -2218,6 +2344,71 @@ def submit_block_action(block_id: str, request: BlockActionRequest) -> dict[str,
         "sanctioned_by": configured_actor,
         "timestamp": ts,
     }
+
+
+class BlockOverrideRequest(BaseModel):
+    plan_id: str | None = None
+    actor: str | None = None
+    role: str | None = None
+    reason_code: str = Field(min_length=2, max_length=120)
+    justification_notes: str = Field(min_length=5)
+    modified_start: datetime | None = None
+    modified_end: datetime | None = None
+    modified_notes: str | None = None
+
+    @field_validator("modified_start", "modified_end")
+    @classmethod
+    def time_is_aware(cls, value: datetime | None) -> datetime | None:
+        if value is None:
+            return None
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+    @field_validator("reason_code", "justification_notes")
+    @classmethod
+    def text_fields_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("This field cannot be blank.")
+        return value
+
+    @model_validator(mode="after")
+    def override_window_is_complete_and_ordered(self) -> "BlockOverrideRequest":
+        if self.modified_start is None or self.modified_end is None:
+            raise ValueError("An override requires both modified_start and modified_end.")
+        if self.modified_end <= self.modified_start:
+            raise ValueError("modified_end must be after modified_start.")
+        return self
+
+
+@app.post("/api/v1/blocks/{block_id}/override", status_code=200)
+def override_block_schedule(block_id: str, request: BlockOverrideRequest) -> dict[str, Any]:
+    """F-08: Dedicated endpoint for regulatory human-in-the-loop schedule override.
+
+    Enforces valid reason_code and justification_notes, modifies the schedule window,
+    and appends a cryptographically chained entry to the BlockAuditLog.
+    """
+    configured_actor, configured_role = configured_identity()
+    actor = request.actor.strip() if request.actor else configured_actor
+    role = request.role.strip() if request.role else configured_role
+
+    with connection() as db:
+        sanction = db.execute("SELECT plan_id FROM block_sanctions WHERE block_id = ?", (block_id,)).fetchone()
+    if not sanction:
+        raise HTTPException(404, f"Block '{block_id}' is not a registered proposed block.")
+
+    plan_id = request.plan_id or sanction["plan_id"]
+    action_req = BlockActionRequest(
+        plan_id=plan_id,
+        actor=actor,
+        role=role,
+        action="OVERRIDE",
+        reason_code=request.reason_code,
+        justification_notes=request.justification_notes,
+        modified_start=request.modified_start,
+        modified_end=request.modified_end,
+        modified_notes=request.modified_notes,
+    )
+    return submit_block_action(block_id=block_id, request=action_req)
 
 
 @app.get("/api/v1/blocks/{block_id}/audit-logs")

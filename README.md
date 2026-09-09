@@ -284,12 +284,22 @@ The backend is [backend/main.py](backend/main.py), implemented with FastAPI and 
 | Optional goods import | POST /api/v1/operations/goods-forecasts | goods_forecasts |
 | Optional COA import | POST /api/v1/operations/coa-windows | coa_windows |
 | F-04 stored-data plan | POST /api/v1/block-plans/from-integrated-data | block_plans |
+| F-07 cockpit KPIs + timeline | GET /api/v1/cockpit/summary | block_plans, block_sanctions, priority_evaluations, feasibility_assessments |
+| F-07/F-08 operator identity | GET /api/v1/cockpit/identity | — (env: RAILSYNC_ACTOR, RAILSYNC_ROLE) |
+| F-08 block action (sanction/override/reject/…) | POST /api/v1/blocks/{block_id}/action | block_sanctions, block_audit_log |
+| F-08 block override (spec alias) | POST /api/v1/blocks/{block_id}/override | block_sanctions, block_audit_log |
+| F-08 block audit history | GET /api/v1/blocks/{block_id}/audit-logs | block_audit_log |
+| F-08 full audit ledger | GET /api/v1/audit/logs | block_audit_log |
+| F-08 audit chain verification | GET /api/v1/audit/verify | block_audit_log |
+| F-08 memo export | GET /api/v1/blocks/{block_id}/export-memo?format=pdf|html | block_sanctions, block_audit_log |
 
 ## Files future contributors need
 
 | File | Responsibility |
 | --- | --- |
-| [backend/main.py](backend/main.py) | Models, validation, persistence, weather lookup, priority scoring, optimizer. |
+| [backend/main.py](backend/main.py) | Models, validation, persistence, weather lookup, priority scoring, optimizer, cockpit summary, override and audit endpoints. |
+| [backend/memo_generator.py](backend/memo_generator.py) | ReportLab PDF and printable HTML Combined Block Sanction Memo generation. |
+| [cockpit.html](cockpit.html), [cockpit.js](cockpit.js), [cockpit.css](cockpit.css) | F-07/F-08 operations cockpit: KPI bar, master corridor Gantt timeline, block modal, priority factor breakdown bars, action/override panel. |
 | [intake.html](intake.html), [intake.js](intake.js) | F-01 manual mapping and ticket entry. |
 | [feasibility.html](feasibility.html), [feasibility.js](feasibility.js) | F-02 manual assessment. |
 | [priority.html](priority.html), [priority.js](priority.js) | F-03 manual evaluation. |
@@ -302,23 +312,39 @@ The backend is [backend/main.py](backend/main.py), implemented with FastAPI and 
 
 Refer to `FEATURE_SPECIFICATIONS.md` for the governing requirements and use these notes when extending the implemented cockpit.
 
-### F-07: Planner and dispatcher operations cockpit
-- **Objective:** Build a unified operational interface integrating F-01 to F-06 features.
-- The cockpit overlay is closed by default and is opened only after selecting a stored block; its controls remain available for normal input.
-- **Implementation Strategy:**
-  - Create a new frontend dashboard (e.g., `cockpit.html`).
-  - Extend the corridor timeline with imported COA availability when its source record is present; never synthesize an availability window.
-  - Provide a consolidated view of tasks with their priority, data-quality warnings, and feasibility states.
-  - Keep every KPI tied to stored records. Do not calculate projected availability until an authority-approved capacity baseline is available.
-  - **Design Note:** Strictly use high-contrast visual encoding to distinguish between *proposed*, *sanctioned*, and *live* states.
+### F-07: Dispatcher operations cockpit
 
-### F-08: Human approval, overrides, audit trail and formal reporting
-- **Objective:** Implement role-based access control, an append-only audit trail, and plan reporting/export.
-- **Implementation Strategy:**
-  - Integrate the API's role guard with the railway identity provider before deployment; the prototype validates supplied role names but does not authenticate an identity.
-  - Add database tables for an append-only audit trail, tracking every recommendation, approval, override, actor, and timestamp.
-  - Enforce logic where deviations from recommended plans require explicit reason codes.
-  - Implement an export feature (PDF or structured template) for a sanction-memo draft. Do not use unapproved official templates.
+**What is implemented:**
+- **KPI bar:** Total Block Hours Saved, Block Hours Used, scheduled block count, and unscheduled task count — all derived directly from stored `block_plans` and `block_sanctions` records; no projected availability is shown until an authority-approved capacity baseline is imported.
+- **Master Corridor Gantt timeline:** Each registered section is a row; 24-hour time slots are the columns; block windows render as coloured pill bars. Multi-department blocks use Engineering (orange `#f97316`), S&T (blue `#3b82f6`), and TRD (purple `#a855f7`) badges on the pill. Traffic-block (🛑) and traction-disconnection (⚡) precaution icons appear on each pill.
+- **Block modal:** Clicking a pill opens a modal showing the block header, scheduled and effective windows, traffic and traction precaution flags, train impact figures, and a task table with task ID, department, maintenance type, kilometre range, priority score, assigned slot, and feasibility status.
+- **Priority factor contribution breakdown:** Below the task table, each task that has a stored F-03 `priority_evaluation` renders a horizontal factor-contribution bar chart. Bars are coloured by department and sized proportionally to `score_contribution`. The policy version, score, tier badge, and the stored explanation sentence are shown. Data is sourced exclusively from the `priority_evaluations` table — no values are computed or estimated in the UI.
+- **What-If simulation drawer:** A slide-over panel accepts a Corridor ID (to look up a stored COA window), section codes, and an optional verified `TrainSchedule` JSON array. No mock schedules are generated; if detailed schedules are absent, the backend returns a reviewable `409` rather than inventing train movements.
+
+**Rules that remain enforced:**
+- Every KPI and timeline slot is grounded in stored database records; mock values are never substituted.
+- Projected line availability stays unavailable (`NOT_AVAILABLE`) until an authority-approved corridor-capacity baseline is imported.
+- The corridor timeline is extended only by imported COA availability source records; availability windows are never synthesized.
+
+### F-08: Human override, audit ledger & reporting
+
+**What is implemented:**
+- **Block sanction state machine:** States are `PROPOSED → SANCTIONED → ACTIVE → EXTENSION_REQUESTED → RESTORATION_RECORDED → COMPLETED`, with `OVERRIDDEN` and `REJECTED` branches at each appropriate step. State transitions are enforced server-side; invalid transitions return `409`.
+- **Role guard:** Decisions must match the `RAILSYNC_ACTOR` / `RAILSYNC_ROLE` server identity. Only `Section Controller` and `Chief Controller` can sanction, override, activate, or complete blocks. `Safety Officer` can reject. Submitted actor and role are validated against the configured identity at the API boundary.
+- **Two action endpoints:**
+  - `POST /api/v1/blocks/{block_id}/action` — general-purpose action accepting `plan_id`, `actor`, `role`, `action`, `reason_code`, `justification_notes`, and optional modified window fields.
+  - `POST /api/v1/blocks/{block_id}/override` — dedicated override endpoint per the Gemini specification; accepts `reason_code`, `justification_notes`, `modified_start`, `modified_end`, and optional `plan_id`/`actor`/`role` (defaults to configured server identity). Delegates to the same audit-chained action handler.
+- **Append-only hash-chained audit ledger:** Every decision writes a row to `block_audit_log` with fields `id`, `block_id`, `plan_id`, `actor`, `role`, `action`, `original_schedule_json`, `modified_schedule_json`, `reason_code`, `justification_notes`, `created_at`, `previous_hash`, and `entry_hash`. The `entry_hash` is a SHA-256 of the entry fields and its `previous_hash`; `GET /api/v1/audit/verify` recomputes and validates every link in chronological order.
+- **Combined Block Sanction Memo export:** `GET /api/v1/blocks/{block_id}/export-memo?format=pdf` returns a ReportLab-generated PDF; `?format=html` returns a printable HTML draft. Both include the official layout header, kilometric range table, traction disconnection flag, co-working departments, safety precautions, audit timestamp barcode, and digital signature block. This is a decision-support draft; it requires authority approval before use as an official railway document.
+
+**Configured identity:**
+
+~~~powershell
+$env:RAILSYNC_ACTOR = "Ananda Jana"
+$env:RAILSYNC_ROLE  = "Section Controller"
+~~~
+
+The cockpit preloads this identity into the Active Human Authority fields; the fields remain editable for operator review but submitted values must match the configured identity. Supported roles: `Section Controller`, `Chief Controller`, `Safety Officer`. Replace with a railway identity provider integration before deployment.
 
 ## Boundary for F-07+
 
