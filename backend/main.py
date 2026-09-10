@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import csv
 import hashlib
 import io
 import httpx
@@ -1904,6 +1905,22 @@ class BlockActionRequest(BaseModel):
         return self
 
 
+class AuditAmendmentRequest(BaseModel):
+    actor: str = Field(min_length=2, max_length=120)
+    role: str = Field(min_length=2, max_length=120)
+    reason_code: str = Field(min_length=2, max_length=120)
+    justification_notes: str = Field(min_length=5)
+    amendment_reason: str = Field(min_length=5, description="Administrative rationale for amending this audit record")
+
+    @field_validator("actor", "role", "reason_code", "justification_notes", "amendment_reason")
+    @classmethod
+    def text_fields_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("This field cannot be blank.")
+        return value
+
+
 SANCTIONING_ROLES = frozenset({"Section Controller", "Chief Controller"})
 REVIEW_ROLES = frozenset({"Safety Officer"})
 SUPPORTED_ROLES = SANCTIONING_ROLES | REVIEW_ROLES
@@ -2423,25 +2440,200 @@ def get_block_audit_logs(block_id: str) -> list[dict[str, Any]]:
 
 
 @app.get("/api/v1/audit/logs")
-def get_audit_logs(block_id: str | None = None, action: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    """Return append-only regulatory audit ledger entries with optional filtering."""
+def get_audit_logs(
+    block_id: str | None = None,
+    action: str | None = None,
+    search: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Return append-only regulatory audit ledger entries with dynamic filtering and search."""
     query = "SELECT * FROM block_audit_log"
-    params = []
-    clauses = []
+    params: list[Any] = []
+    clauses: list[str] = []
     if block_id:
-        clauses.append("block_id = ?")
-        params.append(block_id)
-    if action:
+        clauses.append("block_id LIKE ?")
+        params.append(f"%{block_id.strip()}%")
+    if action and action.upper() != "ALL":
         clauses.append("action = ?")
-        params.append(action.upper())
+        params.append(action.upper().strip())
+    if start_date:
+        clauses.append("created_at >= ?")
+        params.append(start_date.strip())
+    if end_date:
+        ed = end_date.strip()
+        if len(ed) == 10:
+            ed += "T23:59:59"
+        clauses.append("created_at <= ?")
+        params.append(ed)
+    if search:
+        s = f"%{search.strip()}%"
+        clauses.append(
+            "(block_id LIKE ? OR actor LIKE ? OR role LIKE ? OR reason_code LIKE ? OR justification_notes LIKE ?)"
+        )
+        params.extend([s, s, s, s, s])
     if clauses:
         query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY created_at DESC LIMIT ?"
-    params.append(max(1, min(limit, 500)))
+    params.append(max(1, min(limit, 1000)))
 
     with connection() as db:
         rows = db.execute(query, tuple(params)).fetchall()
     return [dict(r) for r in rows]
+
+
+@app.get("/api/v1/audit/export.csv")
+def export_audit_logs_csv(
+    block_id: str | None = None,
+    action: str | None = None,
+    search: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> Response:
+    """F-08: Export regulatory audit ledger to CSV with current active filters applied."""
+    logs = get_audit_logs(
+        block_id=block_id,
+        action=action,
+        search=search,
+        start_date=start_date,
+        end_date=end_date,
+        limit=1000,
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow([
+        "Timestamp (UTC)",
+        "Audit ID",
+        "Block ID",
+        "Plan ID",
+        "Actor",
+        "Role",
+        "Action",
+        "Reason Code",
+        "Justification Notes",
+        "Entry Hash",
+        "Previous Hash",
+    ])
+    for row in logs:
+        writer.writerow([
+            row.get("created_at", ""),
+            row.get("id", ""),
+            row.get("block_id", ""),
+            row.get("plan_id", ""),
+            row.get("actor", ""),
+            row.get("role", ""),
+            row.get("action", ""),
+            row.get("reason_code", ""),
+            row.get("justification_notes", ""),
+            row.get("entry_hash", ""),
+            row.get("previous_hash", ""),
+        ])
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="regulatory_audit_ledger_{int(time.time())}.csv"',
+        },
+    )
+
+
+@app.post("/api/v1/audit/logs/{log_id}/amend")
+def amend_audit_log(log_id: str, request: AuditAmendmentRequest) -> dict[str, Any]:
+    """F-08: Manually amend/rectify an audit ledger entry by appending a chained amendment record."""
+    configured_actor, configured_role = configured_identity()
+    if request.actor != configured_actor or request.role != configured_role:
+        raise HTTPException(403, "The supplied operator identity does not match the server-configured F-08 identity.")
+
+    with connection() as db:
+        target = db.execute("SELECT * FROM block_audit_log WHERE id = ?", (log_id,)).fetchone()
+        if not target:
+            raise HTTPException(404, f"Audit log entry '{log_id}' not found.")
+
+        audit_id = str(uuid4())
+        ts = now().isoformat()
+
+        previous = db.execute(
+            "SELECT entry_hash FROM block_audit_log WHERE entry_hash IS NOT NULL ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+        previous_hash = previous["entry_hash"] if previous else None
+
+        original_summary = {
+            "amends_audit_id": log_id,
+            "previous_action": target["action"],
+            "previous_reason_code": target["reason_code"],
+            "previous_justification_notes": target["justification_notes"],
+        }
+        modified_summary = {
+            "amended_by": configured_actor,
+            "amended_role": configured_role,
+            "amendment_reason": request.amendment_reason,
+            "updated_reason_code": request.reason_code,
+            "updated_justification": request.justification_notes,
+        }
+
+        full_notes = (
+            f"[AMENDMENT for {log_id[:8]}] {request.justification_notes} "
+            f"(Rationale: {request.amendment_reason})"
+        )
+
+        audit_values = {
+            "id": audit_id,
+            "block_id": target["block_id"],
+            "plan_id": target["plan_id"],
+            "actor": configured_actor,
+            "role": configured_role,
+            "action": "AMENDMENT",
+            "original_schedule_json": json.dumps(original_summary, sort_keys=True, default=str),
+            "modified_schedule_json": json.dumps(modified_summary, sort_keys=True, default=str),
+            "reason_code": request.reason_code,
+            "justification_notes": full_notes,
+            "created_at": ts,
+        }
+        entry_hash = _audit_entry_hash(previous_hash, audit_values)
+
+        db.execute(
+            """INSERT INTO block_audit_log
+               (id, block_id, plan_id, actor, role, action, original_schedule_json,
+                modified_schedule_json, reason_code, justification_notes, created_at, previous_hash, entry_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                audit_id,
+                target["block_id"],
+                target["plan_id"],
+                configured_actor,
+                configured_role,
+                "AMENDMENT",
+                audit_values["original_schedule_json"],
+                audit_values["modified_schedule_json"],
+                request.reason_code,
+                full_notes,
+                ts,
+                previous_hash,
+                entry_hash,
+            ),
+        )
+
+        # If this amended entry was the latest action on block_sanctions, update the active sanction's justification/reason
+        latest_entry = db.execute(
+            "SELECT id FROM block_audit_log WHERE block_id = ? AND action != 'AMENDMENT' ORDER BY created_at DESC, id DESC LIMIT 1",
+            (target["block_id"],),
+        ).fetchone()
+        if latest_entry and latest_entry["id"] == log_id:
+            db.execute(
+                """UPDATE block_sanctions
+                   SET justification = ?, reason_code = ?, updated_at = ?
+                   WHERE block_id = ?""",
+                (request.justification_notes, request.reason_code, ts, target["block_id"]),
+            )
+
+    return {
+        "status": "success",
+        "audit_id": audit_id,
+        "amended_log_id": log_id,
+        "entry_hash": entry_hash,
+        "message": f"Audit record {log_id[:8]} amended successfully and cryptographically chained into ledger.",
+    }
 
 
 @app.get("/api/v1/audit/verify")

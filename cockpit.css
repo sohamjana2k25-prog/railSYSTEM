@@ -832,14 +832,34 @@ body.cockpit-body {
   gap: 2px;
 }
 
+.action-radio-label .radio-text strong,
 .radio-text strong {
-  font-size: 13px;
-  color: #fff;
+  font-size: 13.5px !important;
+  color: #ffffff !important;
+  font-weight: 700 !important;
+  letter-spacing: -0.01em;
 }
 
+.action-radio-label .radio-text small,
 .radio-text small {
-  font-size: 11px;
-  color: #94a3b8;
+  font-size: 11.5px !important;
+  color: #f1f5f9 !important;
+  font-weight: 400 !important;
+  line-height: 1.4;
+}
+
+.action-radio-label:has(input[type="radio"]:checked) {
+  border-color: #14b8a6;
+  background: #192d42;
+  box-shadow: 0 0 0 1px #14b8a6, 0 2px 10px rgba(20, 184, 166, 0.25);
+}
+
+.action-radio-label:has(input[type="radio"]:checked) .radio-text strong {
+  color: #ffffff !important;
+}
+
+.action-radio-label:has(input[type="radio"]:checked) .radio-text small {
+  color: #ffffff !important;
 }
 
 .override-inputs-box {
@@ -1167,8 +1187,7 @@ body.cockpit-body {
 .modal-header h2,
 .drawer-header h2,
 .wi-metric-card strong,
-.cockpit-table td,
-.radio-text strong {
+.cockpit-table td {
   color: #172033;
 }
 
@@ -1191,6 +1210,90 @@ body.cockpit-body {
   background: #ffffff;
   border-color: #cbd5e1;
   color: #172033;
+}
+
+/* Ensure modal & action panel fonts are fully visible and readable (F-07 & F-08) */
+.action-panel-heading h3 {
+  font-size: 15px !important;
+  font-weight: 700 !important;
+  color: #0f172a !important;
+}
+
+.modal-subheading {
+  font-size: 13px !important;
+  font-weight: 700 !important;
+  color: #0f172a !important;
+  letter-spacing: 0.02em;
+}
+
+.form-col label {
+  font-size: 12.5px !important;
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+.char-count {
+  font-size: 11px !important;
+  color: #475569 !important;
+  font-weight: 500 !important;
+}
+
+.summary-box .lbl {
+  font-size: 11px !important;
+  color: #475569 !important;
+  text-transform: uppercase;
+  font-weight: 700 !important;
+}
+
+.summary-box .mono-txt,
+.summary-box strong {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+.export-desc strong {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+.export-desc span {
+  color: #334155 !important;
+}
+
+.audit-history-box h4 {
+  color: #1e293b !important;
+  font-weight: 700 !important;
+}
+
+.audit-item-top {
+  color: #0f172a !important;
+  font-weight: 700 !important;
+}
+
+/* Action radio button cards (dark surface in F-08) */
+.action-radio-label .radio-text strong {
+  color: #ffffff !important;
+  font-weight: 700 !important;
+}
+
+.action-radio-label .radio-text small {
+  color: #f1f5f9 !important;
+  font-weight: 400 !important;
+}
+
+#modalWhatIfBtn {
+  background: #0f766e !important;
+  border: 1px solid #0d9488 !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  border-radius: 6px;
+  padding: 6px 14px;
+  box-shadow: 0 1px 3px rgba(13, 148, 136, 0.2);
+}
+
+#modalWhatIfBtn:hover {
+  background: #115e59 !important;
+  color: #ffffff !important;
 }
 
 .kpi-card,
@@ -1297,11 +1400,12 @@ body.cockpit-body {
 
 /* ── F-07 Priority Factor Breakdown ─────────────────────────── */
 .priority-task-breakdown {
-  background: #f8fafc;
-  border: 1px solid #dbe3ee;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
   border-radius: 8px;
   padding: 14px 16px;
   margin-bottom: 10px;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
 }
 
 .priority-task-header {
@@ -1314,9 +1418,9 @@ body.cockpit-body {
 
 .priority-task-id {
   font-family: 'DM Mono', 'Courier New', monospace;
-  font-weight: 600;
-  font-size: 0.82rem;
-  color: #172033;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: #0f172a;
 }
 
 .priority-score-badge {
@@ -1334,8 +1438,9 @@ body.cockpit-body {
 .tier-low       { background: #dcfce7; color: #166534; }
 
 .priority-policy-ref {
-  font-size: 0.72rem;
-  color: #64748b;
+  font-size: 0.74rem;
+  color: #334155;
+  font-weight: 600;
   margin-left: auto;
 }
 
@@ -1353,8 +1458,9 @@ body.cockpit-body {
 }
 
 .factor-label {
-  font-size: 0.76rem;
-  color: #334155;
+  font-size: 0.78rem;
+  color: #0f172a;
+  font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1375,20 +1481,21 @@ body.cockpit-body {
 }
 
 .factor-score {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #334155;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #0f172a;
   text-align: right;
   font-family: 'DM Mono', monospace;
 }
 
 .priority-explanation {
-  font-size: 0.74rem;
-  color: #5f6b7a;
+  font-size: 0.76rem;
+  color: #1e293b;
   margin: 10px 0 0;
-  font-style: italic;
-  border-top: 1px solid #dbe3ee;
+  font-style: normal;
+  border-top: 1px solid #e2e8f0;
   padding-top: 8px;
+  line-height: 1.45;
 }
 
 /* ─── What-If Inline Error / Info Banner ─────────────────────────────────── */

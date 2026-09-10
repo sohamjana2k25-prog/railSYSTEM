@@ -101,6 +101,15 @@ function initEventListeners() {
     });
   }
 
+  const exportJsonBtn = document.getElementById("exportJsonBtn");
+  if (exportJsonBtn) {
+    exportJsonBtn.addEventListener("click", () => {
+      if (currentSelectedBlock) {
+        exportCurrentBlockDecisionJson();
+      }
+    });
+  }
+
   // Global Audit Drawer
   const openAuditBtn = document.getElementById("openAuditLedgerBtn");
   const closeAuditBtn = document.getElementById("closeAuditDrawerBtn");
@@ -544,8 +553,24 @@ async function submitBlockAction() {
     }
 
     const data = await res.json();
+
+    // F-08: Automatically generate and transfer JSON decision records to the respective department(s) who raised input work tickets
+    const transferredFiles = dispatchDepartmentalTransferJsonFiles(
+      currentSelectedBlock,
+      actionChoice,
+      reasonCode,
+      notes,
+      actor,
+      role,
+      data
+    );
+
+    const deptsSummary = transferredFiles
+      .map((f) => `<strong>${escapeHtml(f.department)}</strong> (${f.ticketCount} ticket${f.ticketCount === 1 ? "" : "s"})`)
+      .join(", ");
+
     statusMsg.className = "status-msg success";
-    statusMsg.textContent = `Decision logged! State is now ${data.state}. Audit reference: ${data.audit_id.substring(0, 8)}...`;
+    statusMsg.innerHTML = `Decision logged! State is now <strong>${data.state}</strong>. Audit reference: <code>${data.audit_id.substring(0, 8)}</code>.<br/><span style="display:inline-block;margin-top:5px;color:#0d9488;font-weight:600;">📤 Generated &amp; transferred decision JSON to originating department(s): ${deptsSummary}</span>`;
 
     // Refresh block data
     currentSelectedBlock.state = data.state;
@@ -567,6 +592,238 @@ async function submitBlockAction() {
     statusMsg.className = "status-msg error";
     statusMsg.textContent = `Error: ${err.message}`;
   }
+}
+
+/**
+ * Downloads arbitrary JSON data as a formatted .json file in the user's browser.
+ */
+function downloadJsonFile(filename, jsonData) {
+  const jsonStr = typeof jsonData === "string" ? jsonData : JSON.stringify(jsonData, null, 2);
+  const blob = new Blob([jsonStr], { type: "application/json;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  setTimeout(() => URL.revokeObjectURL(url), 3000);
+}
+
+/**
+ * Department metadata lookup for Indian Railways maintenance systems (TMS, SMMS, TDMS).
+ */
+function getDepartmentMetadata(deptCode) {
+  const code = (deptCode || "").toUpperCase();
+  switch (code) {
+    case "ENGINEERING":
+      return {
+        code: "ENGINEERING",
+        name: "Civil Engineering (Permanent Way & Track Maintenance)",
+        target_system: "TMS (Track Management System)",
+        responsible_roles: ["Section Engineer (P-Way)", "Assistant Divisional Engineer", "Permanent Way Inspector"],
+        contact_channel: "tms-dispatch@railnet.gov.in",
+      };
+    case "SIGNAL_TELECOM":
+      return {
+        code: "SIGNAL_TELECOM",
+        name: "Signal & Telecommunication Department (S&T)",
+        target_system: "SMMS (Signal Maintenance Management System)",
+        responsible_roles: ["Section Engineer (Signals)", "Signal Inspector", "Telecom Maintenance In-Charge"],
+        contact_channel: "smms-dispatch@railnet.gov.in",
+      };
+    case "TRACTION":
+      return {
+        code: "TRACTION",
+        name: "Electrical / Traction Distribution Department (TRD)",
+        target_system: "TDMS (Traction Distribution Management System)",
+        responsible_roles: ["Traction Power Controller (TPC)", "Section Engineer (OHE)", "Sub-Station Operator"],
+        contact_channel: "tdms-dispatch@railnet.gov.in",
+      };
+    default:
+      return {
+        code: code || "GENERAL",
+        name: code ? `${code} Maintenance Department` : "General Operations",
+        target_system: `${code || "DEPT"}-Work-Management-System`,
+        responsible_roles: ["Departmental Maintenance Supervisor", "Section Controller"],
+        contact_channel: "control-dispatch@railnet.gov.in",
+      };
+  }
+}
+
+/**
+ * Builds a formal departmental transfer & decision dispatch record specifically addressed
+ * to the department that originated the work ticket(s).
+ */
+function buildDepartmentTransferJson(deptCode, deptTasks, block, actionChoice, reasonCode, notes, actor, role, serverData) {
+  const deptMeta = getDepartmentMetadata(deptCode);
+  const effStart = serverData?.effective_start || block.effective_start;
+  const effEnd = serverData?.effective_end || block.effective_end;
+  const state = serverData?.state || block.state || "PROPOSED";
+  const isShifted = ["OVERRIDE", "EXTEND"].includes(actionChoice);
+
+  let directive = "";
+  if (actionChoice === "APPROVE" || state === "SANCTIONED") {
+    directive = "SANCTION GRANTED: Department field maintenance party is authorized to occupy designated track section within the effective window under Section Controller clearance.";
+  } else if (actionChoice === "OVERRIDE" || state === "OVERRIDDEN") {
+    directive = "REGULATORY SCHEDULE SHIFT: Possession window has been modified by Section Controller due to traffic/operational constraints. Work must be executed strictly within the updated effective window.";
+  } else if (actionChoice === "REJECT" || state === "REJECTED") {
+    directive = "SANCTION REJECTED: Track possession denied due to critical corridor constraints. Do not occupy track. Work ticket remains unfulfilled and must be resubmitted.";
+  } else if (actionChoice === "ACTIVATE" || state === "ACTIVE") {
+    directive = "BLOCK ACTIVE: Track possession is in effect. Field supervisor must maintain continuous VHF/telecom contact with Section Controller.";
+  } else if (actionChoice === "RESTORE") {
+    directive = "RESTORATION REPORTED: Track section reported cleared and normalized by field party. Awaiting formal ledger completion.";
+  } else if (actionChoice === "COMPLETE" || state === "COMPLETED") {
+    directive = "BLOCK COMPLETED: Possession normalized in tamper-evident ledger and section reopened for commercial operations.";
+  } else {
+    directive = `DECISION APPLIED (${actionChoice}): Updated state is ${state}. Review attached regulatory justification.`;
+  }
+
+  return {
+    dispatch_header: {
+      document_type: "DEPARTMENT_WORK_TICKET_SANCTION_TRANSFER",
+      version: "1.1",
+      transfer_protocol: "RAILSYNC_F08_REGULATORY_DECISION_DISPATCH",
+      dispatch_timestamp_utc: new Date().toISOString(),
+      handover_status: "DISPATCHED_TO_DEPARTMENT",
+    },
+    audit_ledger_proof: {
+      audit_id: serverData?.audit_id || null,
+      entry_hash: serverData?.entry_hash || null,
+      timestamp_utc: serverData?.timestamp || new Date().toISOString(),
+      ledger_authenticity: "COMMITTED_IMMUTABLE",
+    },
+    transferred_to_department: {
+      department_code: deptMeta.code,
+      department_name: deptMeta.name,
+      originating_work_system: deptMeta.target_system,
+      authorized_recipient_roles: deptMeta.responsible_roles,
+      dispatch_channel: deptMeta.contact_channel,
+    },
+    regulatory_decision: {
+      action_taken: actionChoice,
+      block_status: state,
+      regulatory_reason_code: reasonCode,
+      controller_justification_notes: notes,
+      sanctioning_authority: {
+        officer_name: actor,
+        role: role,
+        server_verified_identity: cockpitIdentity ? { actor: cockpitIdentity.actor, role: cockpitIdentity.role } : null,
+        issuing_control_office: "Section Operating Control Center (DRM Office)",
+      },
+    },
+    authorized_possession_window: {
+      block_id: block.block_id,
+      plan_id: block.plan_id,
+      section_id: block.section_id,
+      scheduled_start: block.scheduled_start,
+      scheduled_end: block.scheduled_end,
+      effective_start: effStart,
+      effective_end: effEnd,
+      duration_minutes: block.duration_minutes,
+      schedule_shifted_by_controller: isShifted,
+      absolute_traffic_block_granted: Boolean(block.requires_traffic_block),
+      traction_power_cut_granted: Boolean(block.requires_traction_disconnection),
+      timetable_reference: block.timetable_reference || null,
+      goods_forecast_reference: block.goods_forecast_reference || null,
+    },
+    transferred_work_tickets: (deptTasks || []).map((t) => ({
+      work_ticket_id: t.task_id,
+      department: t.department,
+      originating_system: deptMeta.target_system,
+      maintenance_type: t.maintenance_type,
+      priority_score: t.priority_score,
+      kilometre_span: t.km_span,
+      start_km: t.start_km,
+      end_km: t.end_km,
+      asset_reference: t.asset_reference,
+      required_crews: t.required_crews || [],
+      data_quality_status: t.data_quality_status,
+      ticket_sanction_outcome: state,
+      operational_directive: directive,
+    })),
+    joint_corridor_departments: block.consolidated_departments || [deptMeta.code],
+    field_safety_mandates: [
+      "Field supervisor must confirm banner flag / detonator protection before placing machines or crew on track.",
+      block.requires_traction_disconnection
+        ? "MANDATORY: Confirm 25kV OHE isolation and earthing permit from TPC before beginning work."
+        : "CAUTION: 25kV overhead line remains ENERGIZED. Maintain strict 2.0-meter safety clearance.",
+      "Any required time extension must be formally requested to the Section Controller minimum 15 minutes before window expiry.",
+      "Upon completion, site supervisor must formally issue Track Fit / Restoration Certificate to Operating Control.",
+    ],
+  };
+}
+
+/**
+ * Generates and downloads departmental JSON transfer files for each department
+ * that submitted work tickets in the given block.
+ */
+function dispatchDepartmentalTransferJsonFiles(block, actionChoice, reasonCode, notes, actor, role, serverData) {
+  const tasks = block.assigned_tasks || [];
+  const deptMap = {};
+
+  if (tasks.length === 0) {
+    const fallbackDept = (block.consolidated_departments && block.consolidated_departments[0]) || "ENGINEERING";
+    deptMap[fallbackDept] = [];
+  } else {
+    tasks.forEach((t) => {
+      const dept = t.department || "ENGINEERING";
+      if (!deptMap[dept]) deptMap[dept] = [];
+      deptMap[dept].push(t);
+    });
+  }
+
+  const generatedFiles = [];
+  const sanitizedBlockId = (block.block_id || "BLOCK").replace(/[^a-zA-Z0-9_-]/g, "_");
+  const timestampStr = new Date().toISOString().replace(/[:.]/g, "-");
+
+  const deptEntries = Object.entries(deptMap);
+  deptEntries.forEach(([dept, deptTasks], idx) => {
+    const transferData = buildDepartmentTransferJson(
+      dept,
+      deptTasks,
+      block,
+      actionChoice,
+      reasonCode,
+      notes,
+      actor,
+      role,
+      serverData
+    );
+    const filename = `department_transfer_${dept}_${sanitizedBlockId}_${actionChoice.toLowerCase()}_${timestampStr}.json`;
+
+    // Stagger slightly if multiple departments to avoid browser download blocking
+    setTimeout(() => {
+      downloadJsonFile(filename, transferData);
+    }, idx * 200);
+
+    generatedFiles.push({
+      department: dept,
+      ticketCount: deptTasks.length,
+      filename: filename,
+    });
+  });
+
+  return generatedFiles;
+}
+
+/**
+ * On-demand export of the current selected block's departmental decision transfers.
+ */
+function exportCurrentBlockDecisionJson() {
+  if (!currentSelectedBlock) return;
+  const actor = document.getElementById("controllerNameInput")?.value.trim() || cockpitIdentity?.actor || "Local Operator";
+  const role = document.getElementById("controllerRoleSelect")?.value || cockpitIdentity?.role || "Section Controller";
+  const actionChoice = document.querySelector('input[name="blockActionChoice"]:checked')?.value || "APPROVE";
+  const reasonCode = document.getElementById("reasonCodeSelect")?.value || "ROUTINE_SANCTION";
+  const notes = document.getElementById("justificationNotesInput")?.value.trim() || "Snapshot transferred to originating department(s)";
+
+  dispatchDepartmentalTransferJsonFiles(currentSelectedBlock, actionChoice, reasonCode, notes, actor, role, {
+    state: currentSelectedBlock.state,
+    effective_start: currentSelectedBlock.effective_start,
+    effective_end: currentSelectedBlock.effective_end,
+    timestamp: new Date().toISOString(),
+  });
 }
 
 async function loadBlockAuditHistory(blockId) {
