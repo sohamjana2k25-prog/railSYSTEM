@@ -19,6 +19,7 @@
         </a>
         <nav class="main-nav" aria-label="Primary navigation">
           <a class="nav-link active" href="/">Overview</a>
+          <a class="nav-link active" href="/">Overview</a>
           <a class="nav-link" href="/intake">Data intake</a>
           <a class="nav-link" href="/feasibility">Feasibility</a>
           <a class="nav-link" href="/priority">Priority</a>
@@ -28,21 +29,25 @@
           <a class="nav-link" href="/live-monitor">Live monitor</a>
           <a class="nav-link" href="/cockpit">Cockpit</a>
         </nav>
+          <a class="nav-link" href="/operations-data">Operations data</a>
+          <a class="nav-link" href="/what-if">What-if</a>
+          <a class="nav-link" href="/live-monitor">Live monitor</a>
+        </nav>
         <div class="topbar-actions">
           <button class="icon-button" aria-label="Notifications"><span class="bell"></span><b>3</b></button>
-          <button class="profile" aria-label="Open user menu"><span class="avatar">AJ</span><span class="profile-copy"><strong>Ananda Jana</strong><small>Section controller</small></span><span class="chevron">⌄</span></button>
+          <button class="profile" aria-label="Open user menu"><span class="avatar" id="profile-avatar">—</span><span class="profile-copy"><strong>Loading identity...</strong><small>Loading role...</small></span><span class="chevron">⌄</span></button>
         </div>
       </header>
 
       <main>
         <section class="hero" id="overview">
           <div class="hero-copy">
-            <p class="eyebrow"><span></span> DIVISIONAL CONTROL · EASTERN CORRIDOR</p>
+            <p class="eyebrow"><span></span> DIVISIONAL CONTROL</p>
             <h1>Plan every block with<br /><em>one clear track ahead.</em></h1>
             <p class="hero-description">Coordinate Engineering, S&amp;T and Traction work in shared windows—while protecting train operations.</p>
-            <div class="hero-actions">
-              <button class="primary-button" data-action="generate-plan">Generate weekly plan <span>→</span></button>
-              <button class="text-button" data-action="what-if">Run what-if scenario <span>↗</span></button>
+              <div class="hero-actions">
+                <button class="primary-button" data-route="/planner">Generate weekly plan <span>→</span></button>
+                <button class="text-button" data-route="/what-if">Run what-if scenario <span>↗</span></button>
             </div>
           </div>
           <div class="rail-illustration" aria-label="Illustration of a railway corridor with planned maintenance windows" role="img">
@@ -58,36 +63,30 @@
         </section>
 
         <section class="summary-grid" aria-label="Key planning indicators">
-          <article class="metric-card"><div class="metric-icon blue">⌁</div><div><p>Planned availability</p><strong>98.4<small>%</small></strong><span class="positive">↑ 1.8% <em>vs. last week</em></span></div></article>
-          <article class="metric-card"><div class="metric-icon amber">◒</div><div><p>Shared block hours</p><strong>42.5<small> h</small></strong><span class="positive">↑ 9.2 h <em>consolidated</em></span></div></article>
-          <article class="metric-card"><div class="metric-icon violet">⊞</div><div><p>Priority work due</p><strong>17</strong><span class="muted-line">6 critical · 11 high</span></div></article>
-          <article class="metric-card"><div class="metric-icon green">✓</div><div><p>Sanctioned this week</p><strong>8<small> / 11</small></strong><span class="muted-line">3 awaiting review</span></div></article>
+          <article class="metric-card"><div class="metric-icon blue">⌁</div><div><p>Planned availability</p><strong id="metric-availability">—<small>%</small></strong><span id="metric-availability-note" class="muted-line">No approved baseline recorded</span></div></article>
+          <article class="metric-card"><div class="metric-icon amber">◒</div><div><p>Shared block hours</p><strong id="metric-hours">—<small> h</small></strong><span class="muted-line">Current stored plan</span></div></article>
+          <article class="metric-card"><div class="metric-icon violet">⊞</div><div><p>Scheduled tasks</p><strong id="metric-tasks">—</strong><span id="metric-unscheduled" class="muted-line">— unscheduled</span></div></article>
+          <article class="metric-card"><div class="metric-icon green">✓</div><div><p>Sanctioned blocks</p><strong id="metric-sanctioned">—</strong><span id="metric-proposed" class="muted-line">— proposed</span></div></article>
         </section>
 
         <section class="workspace" id="plan">
-          <div class="section-heading"><div><p class="eyebrow"><span></span> COORDINATED BLOCK PLAN</p><h2>Next 7 days</h2></div><div class="heading-actions"><button class="period-button">07 – 13 Sep 2026 <span>⌄</span></button><button class="outline-button" data-action="open-plan">Open full plan <span>→</span></button></div></div>
+          <div class="section-heading"><div><p class="eyebrow"><span></span> COORDINATED BLOCK PLAN</p><h2>Current stored plan</h2></div><div class="heading-actions"><button class="outline-button" data-route="/planner">Open full plan <span>→</span></button></div></div>
           <div class="planner-card">
-            <div class="timeline-toolbar"><div><strong>Howrah — Bardhaman Main Line</strong><span class="route-status"><i></i> COA windows synchronized 6 min ago</span></div><div class="legend"><span><i class="eng"></i>Engineering</span><span><i class="st"></i>S&amp;T</span><span><i class="trd"></i>Traction</span></div></div>
+            <div class="timeline-toolbar"><div><strong id="overview-section-title">Loading registered sections...</strong><span id="overview-route-status" class="route-status"><i></i> Loading stored plan</span></div><div class="legend"><span><i class="eng"></i>Engineering</span><span><i class="st"></i>S&amp;T</span><span><i class="trd"></i>Traction</span></div></div>
             <div class="timeline-wrap">
-              <div class="time-head"><span>Section</span><div><b>Sun 07</b><b>Mon 08</b><b>Tue 09</b><b>Wed 10</b><b>Thu 11</b><b>Fri 12</b><b>Sat 13</b></div></div>
-              <div class="timeline-row"><div class="route-name"><strong>HWH · BDC</strong><small>Main line</small></div><div class="track-lane"><span class="today-line"></span><button class="block eng-block block-a" data-block="B-264"><i></i> 01:30–03:45</button><button class="block st-block block-b" data-block="B-281"><i></i> 00:45–02:15</button><button class="block combo-block block-c" data-block="B-290"><i></i><i></i><i></i> 01:00–04:30</button></div></div>
-              <div class="timeline-row"><div class="route-name"><strong>BDC · BWN</strong><small>Third line</small></div><div class="track-lane"><button class="block trd-block block-d" data-block="B-267"><i></i> 11:45–13:15</button><button class="block combo-block block-e" data-block="B-284"><i></i><i></i> 02:00–05:00</button></div></div>
-              <div class="timeline-row"><div class="route-name"><strong>BDC · BWN</strong><small>Up main</small></div><div class="track-lane"><button class="block st-block block-f" data-block="B-275"><i></i> 00:30–01:45</button><button class="block eng-block block-g" data-block="B-298"><i></i> 01:15–03:30</button></div></div>
+              <div class="time-head"><span>Section</span><div id="overview-time-head"><b>Loading plan horizon...</b></div></div>
+              <div id="overview-timeline-rows"><div class="timeline-row"><div class="route-name"><strong>Loading stored blocks...</strong></div></div></div>
             </div>
-            <div class="planner-footer"><span><i class="spark"></i> 42.5 shared block-hours identified across this corridor</span><button class="text-button compact" data-action="what-if">Test a window <span>→</span></button></div>
+            <div class="planner-footer"><span id="overview-plan-status"><i class="spark"></i> Loading stored plan...</span><button class="text-button compact" data-route="/what-if">Test a window <span>→</span></button></div>
           </div>
         </section>
 
         <section class="lower-grid">
-          <section class="priority-panel" id="tasks"><div class="section-heading compact-heading"><div><p class="eyebrow"><span></span> PRIORITY QUEUE</p><h2>Needs planning attention</h2></div><button class="text-button compact" data-action="open-tasks">View all <span>→</span></button></div><div class="task-list">
-            <button class="task-row" data-task="Signal 24"><span class="priority critical">P1</span><div><strong>Track circuit intermittent failure</strong><p>S&amp;T · BDC–BWN Up Main · KM 108/4</p></div><div class="task-score"><strong>94</strong><small>Critical</small></div><span class="row-arrow">→</span></button>
-            <button class="task-row" data-task="Track 79"><span class="priority high">P2</span><div><strong>Rail weld ultrasonic observation</strong><p>Engineering · HWH–BDC Main · KM 42/7</p></div><div class="task-score"><strong>82</strong><small>High</small></div><span class="row-arrow">→</span></button>
-            <button class="task-row" data-task="OHE 33"><span class="priority high">P2</span><div><strong>Insulator replacement</strong><p>Traction · BDC–BWN Third Line · Mast 216/3</p></div><div class="task-score"><strong>78</strong><small>High</small></div><span class="row-arrow">→</span></button>
-          </div></section>
-          <aside class="control-panel" id="live"><div class="section-heading compact-heading"><div><p class="eyebrow"><span></span> LIVE CONTROL</p><h2>Blocks in progress</h2></div><span class="live-pill"><i></i> 2 live</span></div><div class="live-block"><div class="live-top"><span class="department-tag traction">Traction</span><span>Ends 01:40</span></div><strong>OHE inspection · B-257</strong><p>HWH–BDC Main · KM 33/0–34/2</p><div class="progress"><span style="width:68%"></span></div><div class="live-foot"><span>68% complete</span><button data-action="track-live">Track live →</button></div></div><div class="live-block muted-block"><div class="live-top"><span class="department-tag engineering">Engineering</span><span>Starts 22:30</span></div><strong>Point &amp; crossing maintenance · B-259</strong><p>BDC Yard · Point 38A</p></div></aside>
+          <section class="priority-panel" id="tasks"><div class="section-heading compact-heading"><div><p class="eyebrow"><span></span> PRIORITY QUEUE</p><h2>Needs planning attention</h2></div><button class="text-button compact" data-route="/intake">View all <span>→</span></button></div><div id="overview-task-list" class="task-list"><p class="muted-line">Loading stored tasks...</p></div></section>
+          <aside class="control-panel" id="live"><div class="section-heading compact-heading"><div><p class="eyebrow"><span></span> LIVE CONTROL</p><h2>Stored block state</h2></div><button class="text-button compact" data-route="/live-monitor">Open monitor <span>→</span></button></div><div id="overview-live-state" class="live-block"><p class="muted-line">Live status is available in Live monitor.</p></div></aside>
         </section>
       </main>
-      <footer><span>RailSync · Automatic Block Planning</span><span>Data status: <i></i> Connected to planning sandbox</span></footer>
+      <footer><span>RailSync · Automatic Block Planning</span><span id="overview-data-status">Data status: <i></i> Loading stored records</span></footer>
     </div>
     <div class="modal-backdrop" hidden><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button class="modal-close" aria-label="Close dialog">×</button><p class="eyebrow"><span></span> PLANNING ASSISTANT</p><h2 id="modal-title">Weekly plan ready for review</h2><p id="modal-body">The optimizer has consolidated compatible work into COA-approved windows. Review operational impact before submitting for sanction.</p><div class="modal-actions"><button class="primary-button">Review proposed plan <span>→</span></button><button class="outline-button modal-cancel">Close</button></div></section></div>
     <script src="/static/app.js"></script>

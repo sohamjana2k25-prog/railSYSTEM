@@ -600,54 +600,80 @@ app = FastAPI(title="RailSync F-01 Ingestion API", version="1.0.0")
 app.mount("/static", StaticFiles(directory=ROOT), name="static")
 
 
+def render_page(filename: str) -> HTMLResponse:
+    page = (ROOT / filename).read_text(encoding="utf-8")
+    if 'href="/cockpit"' not in page:
+        page = page.replace(
+            "</nav>",
+            '<a class="nav-link" href="/cockpit">Cockpit</a></nav>',
+            1,
+        )
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+
 @app.on_event("startup")
 def startup() -> None:
     initialize_database()
 
 
 @app.get("/", include_in_schema=False)
-def dashboard() -> FileResponse:
-    return FileResponse(ROOT / "index.html")
+def dashboard() -> HTMLResponse:
+    return render_page("index.html")
 
 
 @app.get("/intake", include_in_schema=False)
-def intake_page() -> FileResponse:
-    return FileResponse(ROOT / "intake.html")
+def intake_page() -> HTMLResponse:
+    return render_page("intake.html")
 
 
 @app.get("/feasibility", include_in_schema=False)
-def feasibility_page() -> FileResponse:
-    return FileResponse(ROOT / "feasibility.html")
+def feasibility_page() -> HTMLResponse:
+    page = bytes(render_page("feasibility.html").body).decode("utf-8")
+    page = page.replace(
+        '<a class="nav-link active" href="/feasibility">Feasibility</a><a class="nav-link" href="/what-if">What-if</a>',
+        '<a class="nav-link active" href="/feasibility">Feasibility</a><a class="nav-link" href="/priority">Priority</a><a class="nav-link" href="/planner">Block plan</a><a class="nav-link" href="/operations-data">Operations data</a><a class="nav-link" href="/what-if">What-if</a>',
+    )
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/priority", include_in_schema=False)
-def priority_page() -> FileResponse:
-    return FileResponse(ROOT / "priority.html")
+def priority_page() -> HTMLResponse:
+    page = bytes(render_page("priority.html").body).decode("utf-8")
+    page = page.replace(
+        '<a class="nav-link active" href="/priority">Priority</a><a class="nav-link" href="/what-if">What-if</a>',
+        '<a class="nav-link active" href="/priority">Priority</a><a class="nav-link" href="/planner">Block plan</a><a class="nav-link" href="/operations-data">Operations data</a><a class="nav-link" href="/what-if">What-if</a>',
+    )
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/planner", include_in_schema=False)
-def planner_page() -> FileResponse:
-    return FileResponse(ROOT / "planner.html")
+def planner_page() -> HTMLResponse:
+    page = bytes(render_page("planner.html").body).decode("utf-8")
+    page = page.replace(
+        '<a class="nav-link active" href="/planner">Block plan</a><a class="nav-link" href="/what-if">What-if</a>',
+        '<a class="nav-link active" href="/planner">Block plan</a><a class="nav-link" href="/operations-data">Operations data</a><a class="nav-link" href="/what-if">What-if</a>',
+    )
+    return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
 
 @app.get("/operations-data", include_in_schema=False)
-def operations_data_page() -> FileResponse:
-    return FileResponse(ROOT / "operations-data.html")
+def operations_data_page() -> HTMLResponse:
+    return render_page("operations-data.html")
 
 
 @app.get("/what-if", include_in_schema=False)
-def what_if_page() -> FileResponse:
-    return FileResponse(ROOT / "what-if.html")
+def what_if_page() -> HTMLResponse:
+    return render_page("what-if.html")
 
 
 @app.get("/live-monitor", include_in_schema=False)
-def live_monitor_page() -> FileResponse:
-    return FileResponse(ROOT / "live-monitor.html")
+def live_monitor_page() -> HTMLResponse:
+    return render_page("live-monitor.html")
 
 
 @app.get("/cockpit", include_in_schema=False)
-def cockpit_page() -> FileResponse:
-    return FileResponse(ROOT / "cockpit.html")
+def cockpit_page() -> HTMLResponse:
+    return render_page("cockpit.html")
 
 
 @app.post("/api/v1/network-references", status_code=201)
@@ -2240,6 +2266,8 @@ def submit_block_action(block_id: str, request: BlockActionRequest) -> dict[str,
     elif act in {"OVERRIDE", "OVERRIDDEN"}:
         if configured_role not in SANCTIONING_ROLES:
             raise HTTPException(403, "Only a sanctioning authority can override a block.")
+        if request.modified_start is None or request.modified_end is None:
+            raise HTTPException(422, "An override requires both modified_start and modified_end.")
         new_state = BlockSanctionState.OVERRIDDEN
         eff_start = request.modified_start.isoformat()
         eff_end = request.modified_end.isoformat()
