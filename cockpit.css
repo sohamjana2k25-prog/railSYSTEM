@@ -1164,8 +1164,20 @@ body.cockpit-body {
   color: #172033;
 }
 
+.main-nav {
+  overflow-x: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.main-nav::-webkit-scrollbar {
+  display: none;
+}
+
 .nav-link {
   color: #5f6b7a;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .user-role-badge {
